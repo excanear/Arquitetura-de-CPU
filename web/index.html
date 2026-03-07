@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>EduRISC-16 — Visualizador de Pipeline</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+<!-- ====================================================================
+     Cabeçalho
+     ==================================================================== -->
+<header>
+  <h1>EduRISC-16 <span class="subtitle">Pipeline Visualizer</span></h1>
+  <p class="tagline">Simulador interativo de processador de 5 estágios</p>
+</header>
+
+<main>
+
+  <!-- ================================================================
+       Painel de Controle
+       ================================================================ -->
+  <section class="panel" id="panel-control">
+    <h2>Controle</h2>
+    <div class="controls">
+      <button id="btn-step"  title="Avançar 1 ciclo">&#9654; Step</button>
+      <button id="btn-run"   title="Executar até HLT">&#9654;&#9654; Run</button>
+      <button id="btn-reset" title="Reiniciar simulação">&#8635; Reset</button>
+      <button id="btn-load"  title="Carregar programa de exemplo">&#128190; Exemplo</button>
+    </div>
+    <div class="cycle-display">
+      Ciclo: <span id="cycle-num">0</span>
+      &ensp;|&ensp;
+      PC: <span id="pc-display">0x0000</span>
+      &ensp;|&ensp;
+      Status: <span id="status-display" class="status-idle">IDLE</span>
+    </div>
+
+    <!-- Editor de assembly inline -->
+    <div class="editor-wrapper">
+      <label for="asm-source">Código Assembly (EduRISC-16):</label>
+      <textarea id="asm-source" rows="12" spellcheck="false">; Exemplo: soma de 1 a 5
+        .ORG 0x000
+            LOAD R1, [R0+16]  ; R1 = 5  (literal na memória[16])
+            LOAD R2, [R0+17]  ; R2 = 0  (acumulador)
+            LOAD R3, [R0+18]  ; R3 = 1  (incremento)
+LOOP:       ADD  R2, R2, R1   ; acc += i
+            SUB  R1, R1, R3   ; i--
+            JNZ  LOOP         ; se R1 != 0, repete
+            HLT
+        .ORG 0x010
+        .WORD 5
+        .WORD 0
+        .WORD 1
+      </textarea>
+      <button id="btn-assemble">&#9881; Montar</button>
+      <div id="asm-error" class="asm-error hidden"></div>
+    </div>
+  </section>
+
+  <!-- ================================================================
+       Visualização do Pipeline
+       ================================================================ -->
+  <section class="panel" id="panel-pipeline">
+    <h2>Pipeline — 5 Estágios</h2>
+    <div class="pipeline-track" id="pipeline-track">
+
+      <div class="stage" id="stage-IF">
+        <div class="stage-header">IF<br/><small>Instruction Fetch</small></div>
+        <div class="stage-instr" id="cell-IF">—</div>
+      </div>
+
+      <div class="stage-arrow">&#8594;</div>
+
+      <div class="stage" id="stage-ID">
+        <div class="stage-header">ID<br/><small>Instruction Decode</small></div>
+        <div class="stage-instr" id="cell-ID">—</div>
+      </div>
+
+      <div class="stage-arrow">&#8594;</div>
+
+      <div class="stage" id="stage-EX">
+        <div class="stage-header">EX<br/><small>Execute</small></div>
+        <div class="stage-instr" id="cell-EX">—</div>
+      </div>
+
+      <div class="stage-arrow">&#8594;</div>
+
+      <div class="stage" id="stage-MEM">
+        <div class="stage-header">MEM<br/><small>Memory</small></div>
+        <div class="stage-instr" id="cell-MEM">—</div>
+      </div>
+
+      <div class="stage-arrow">&#8594;</div>
+
+      <div class="stage" id="stage-WB">
+        <div class="stage-header">WB<br/><small>Write-Back</small></div>
+        <div class="stage-instr" id="cell-WB">—</div>
+      </div>
+
+    </div>
+
+    <!-- Detalhes dos registradores de pipeline -->
+    <div class="pipe-regs-grid" id="pipe-regs-grid">
+      <div class="pipe-reg-box" id="preg-IFID">
+        <div class="preg-title">IF/ID</div>
+        <div class="preg-body" id="preg-IFID-body">—</div>
+      </div>
+      <div class="pipe-reg-box" id="preg-IDEX">
+        <div class="preg-title">ID/EX</div>
+        <div class="preg-body" id="preg-IDEX-body">—</div>
+      </div>
+      <div class="pipe-reg-box" id="preg-EXMEM">
+        <div class="preg-title">EX/MEM</div>
+        <div class="preg-body" id="preg-EXMEM-body">—</div>
+      </div>
+      <div class="pipe-reg-box" id="preg-MEMWB">
+        <div class="preg-title">MEM/WB</div>
+        <div class="preg-body" id="preg-MEMWB-body">—</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================================================================
+       Banco de Registradores
+       ================================================================ -->
+  <section class="panel" id="panel-regs">
+    <h2>Banco de Registradores</h2>
+    <div class="regfile-grid" id="regfile-grid">
+      <!-- preenchido via JS -->
+    </div>
+    <div class="flags-row" id="flags-row">
+      <span class="flag" id="flag-Z">Z=0</span>
+      <span class="flag" id="flag-C">C=0</span>
+      <span class="flag" id="flag-N">N=0</span>
+      <span class="flag" id="flag-V">V=0</span>
+    </div>
+  </section>
+
+  <!-- ================================================================
+       Visualizador de Memória
+       ================================================================ -->
+  <section class="panel" id="panel-mem">
+    <h2>Memória</h2>
+    <div class="mem-controls">
+      Endereço: 0x<input type="text" id="mem-addr-input" value="0000" maxlength="4" size="4" />
+      <button id="btn-mem-goto">Ir</button>
+    </div>
+    <table class="mem-table" id="mem-table">
+      <thead>
+        <tr>
+          <th>Endereço</th>
+          <th>+0</th><th>+1</th><th>+2</th><th>+3</th>
+          <th>+4</th><th>+5</th><th>+6</th><th>+7</th>
+        </tr>
+      </thead>
+      <tbody id="mem-tbody">
+        <!-- preenchido via JS -->
+      </tbody>
+    </table>
+  </section>
+
+  <!-- ================================================================
+       Log de Eventos + Estatísticas
+       ================================================================ -->
+  <section class="panel" id="panel-log">
+    <h2>Log de Eventos</h2>
+    <div class="stats-bar" id="stats-bar">
+      Ciclos: <b id="stat-cycles">0</b> &nbsp;|&nbsp;
+      Instruções: <b id="stat-instrs">0</b> &nbsp;|&nbsp;
+      Stalls: <b id="stat-stalls">0</b> &nbsp;|&nbsp;
+      Flushes: <b id="stat-flushes">0</b> &nbsp;|&nbsp;
+      IPC: <b id="stat-ipc">0.00</b>
+    </div>
+    <div class="event-log" id="event-log">
+      <!-- preenchido via JS -->
+    </div>
+  </section>
+
+</main>
+
+<footer>
+  <p>EduRISC-16 Educational CPU Lab &mdash; Arquitetura de Computadores</p>
+</footer>
+
+<script src="cpu_visualization.js"></script>
+</body>
+</html>

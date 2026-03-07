@@ -1,0 +1,70 @@
+v 4
+file "C:\ghdl\" "rtl\cpu_top.vhd" "cb87aed72827aec847c94e63995adf1c3ac8e12c" "20260306233821.797":
+  entity cpu_top at 47( 2051) + 0 on 63;
+  architecture rtl of cpu_top at 114( 4608) + 0 on 64;
+file "C:\ghdl\" "rtl\cache\icache.vhd" "2a9fe66978c938d8bd6419fa90c1cbcc687e5be7" "20260306233609.463":
+  entity icache at 34( 1934) + 0 on 49;
+  architecture rtl of icache at 78( 3607) + 0 on 50;
+file "C:\ghdl\" "rtl\writeback\writeback_stage.vhd" "b90a3c70f963be348eb8d4271cc21c3cd06d1b16" "20260306233609.390":
+  entity writeback_stage at 19( 884) + 0 on 45;
+  architecture rtl of writeback_stage at 47( 1860) + 0 on 46;
+file "C:\ghdl\" "rtl\memory\load_store_unit.vhd" "9c15ba0036d0a93a8d23019749841eeebf57d8d2" "20260306233609.314":
+  entity load_store_unit at 20( 931) + 0 on 41;
+  architecture rtl of load_store_unit at 80( 3039) + 0 on 42;
+file "C:\ghdl\" "rtl\execute\forwarding_unit.vhd" "2df6c03945c8d790a787fb670fe953e1954ad9de" "20260306233609.240":
+  entity forwarding_unit at 24( 1181) + 0 on 37;
+  architecture rtl of forwarding_unit at 61( 2606) + 0 on 38;
+file "C:\ghdl\" "rtl\execute\alu.vhd" "fa66bfedb157b4de26a527e2b3431a0b6c7eb5db" "20260306233609.175":
+  entity alu at 24( 1106) + 0 on 33;
+  architecture rtl of alu at 48( 1801) + 0 on 34;
+file "C:\ghdl\" "rtl\decode\register_file.vhd" "f0e6c4363397632be9f2d1ad4f529c0bacd2bbde" "20260306233609.108":
+  entity register_file at 22( 1127) + 0 on 29;
+  architecture rtl of register_file at 58( 2407) + 0 on 30;
+file "C:\ghdl\" "rtl\decode\instruction_decoder.vhd" "d4629b68b55412c5353b4ca69019620311f67519" "20260306233609.040":
+  entity instruction_decoder at 16( 672) + 0 on 25;
+  architecture rtl of instruction_decoder at 44( 1630) + 0 on 26;
+file "C:\ghdl\" "rtl\fetch\branch_handler.vhd" "1a2a315827736abb46d6b44f042104fdc016c42e" "20260306233608.968":
+  entity branch_handler at 20( 1013) + 0 on 21;
+  architecture rtl of branch_handler at 73( 3102) + 0 on 22;
+file "C:\ghdl\" "rtl\fetch\pc_reg.vhd" "78c9b13466ce6b55a9990d5418d7b09e9f653257" "20260306233608.898":
+  entity pc_reg at 16( 637) + 0 on 17;
+  architecture rtl of pc_reg at 50( 1716) + 0 on 18;
+file "C:\ghdl\" "rtl\pkg\cpu_pkg.vhd" "e10a23ebe35b1ca2b97d12de7e4e29f9dc8cabb9" "20260306233608.831":
+  package cpu_pkg at 8( 336) + 0 on 13 body;
+  package body cpu_pkg at 323( 15411) + 0 on 14;
+file "C:\ghdl\" "rtl\pkg\axi4_pkg.vhd" "c65788fddcbc435ad75fd9d1392ebce43a4167ea" "20260306233608.799":
+  package axi4_pkg at 8( 360) + 0 on 11 body;
+  package body axi4_pkg at 178( 7216) + 0 on 12;
+file "C:\ghdl\" "rtl\mmu\mmu.vhd" "13edb4581c76e2b83c16e738f2346dc99da355b7" "20260306233608.866":
+  entity mmu at 30( 1319) + 0 on 15;
+  architecture rtl of mmu at 91( 3842) + 0 on 16;
+file "C:\ghdl\" "rtl\fetch\branch_predictor.vhd" "ed75ef8ad60590d34c04732c51c4149a5e930388" "20260306233608.933":
+  entity branch_predictor at 32( 1637) + 0 on 19;
+  architecture rtl of branch_predictor at 65( 2867) + 0 on 20;
+file "C:\ghdl\" "rtl\fetch\fetch_stage.vhd" "84a67d3d4b0db41b1eb5c6534024e3046bbd42bc" "20260306233609.007":
+  entity fetch_stage at 23( 1055) + 0 on 23;
+  architecture rtl of fetch_stage at 99( 4389) + 0 on 24;
+file "C:\ghdl\" "rtl\decode\immediate_generator.vhd" "78e909ccb87f07eb8dfbc1df9145c7e416d25d0f" "20260306233609.073":
+  entity immediate_generator at 19( 771) + 0 on 27;
+  architecture rtl of immediate_generator at 37( 1203) + 0 on 28;
+file "C:\ghdl\" "rtl\decode\decode_stage.vhd" "2a5d58b11a3f16fa1507c87517c50353142d38e5" "20260306233609.142":
+  entity decode_stage at 18( 803) + 0 on 31;
+  architecture rtl of decode_stage at 55( 2022) + 0 on 32;
+file "C:\ghdl\" "rtl\execute\branch_comparator.vhd" "d22e40bd4b4ab87be986d31aa3ed9da1baa50db8" "20260306233609.207":
+  entity branch_comparator at 18( 782) + 0 on 35;
+  architecture rtl of branch_comparator at 39( 1396) + 0 on 36;
+file "C:\ghdl\" "rtl\execute\execute_stage.vhd" "7073be6d0398a200e878f51ae1f9ef89d757048c" "20260306233821.779":
+  entity execute_stage at 14( 574) + 0 on 61;
+  architecture rtl of execute_stage at 74( 3041) + 0 on 62;
+file "C:\ghdl\" "rtl\memory\memory_stage.vhd" "246f45442f0ba2a0a5d3ac631a32437f1b99e682" "20260306233609.359":
+  entity memory_stage at 12( 486) + 0 on 43;
+  architecture rtl of memory_stage at 65( 2464) + 0 on 44;
+file "C:\ghdl\" "rtl\csr\csr_reg.vhd" "c120fda292b30f41e4e681bc3a5c628635b14258" "20260306233609.427":
+  entity csr_reg at 38( 1883) + 0 on 47;
+  architecture rtl of csr_reg at 104( 5033) + 0 on 48;
+file "C:\ghdl\" "rtl\cache\dcache.vhd" "d7d2a294095489e4689a04e217019bc6e69650d5" "20260306233609.515":
+  entity dcache at 30( 1803) + 0 on 51;
+  architecture rtl of dcache at 100( 4595) + 0 on 52;
+file "C:\ghdl\" "sim\cpu_top_tb.vhd" "dfa3567d4c37d9e93be401b29428ec47ccdbb631" "20260306233821.802":
+  entity cpu_top_tb at 39( 2044) + 0 on 65;
+  architecture sim of cpu_top_tb at 51( 2251) + 0 on 66;

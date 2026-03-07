@@ -1,0 +1,89 @@
+## =============================================================================
+## quartus.qsf  —  Intel Quartus Prime Lite / Standard project settings file
+## Target: Terasic DE0-Nano (Intel/Altera Cyclone IV E — EP4CE22F17C6)
+##
+## Usage:
+##   quartus_sh --flow compile quartus.qsf
+## OR open in Quartus IDE: File → Open Project → quartus.qpf
+##
+## Outputs: output_files/rv32ima_cpu.sof  (JTAG programmable)
+##          output_files/rv32ima_cpu.rbf  (raw binary for SD/flash)
+## =============================================================================
+
+## --- Project meta ---
+set_global_assignment -name PROJECT_REVISION         "rv32ima_cpu"
+set_global_assignment -name ORIGINAL_QUARTUS_VERSION "23.1"
+set_global_assignment -name PROJECT_CREATION_TIME_DATE "00:00:00 JANUARY 01, 2024"
+set_global_assignment -name LAST_QUARTUS_VERSION     "23.1.0 Lite Edition"
+
+## --- Device ---
+set_global_assignment -name FAMILY          "Cyclone IV E"
+set_global_assignment -name DEVICE          EP4CE22F17C6
+set_global_assignment -name TOP_LEVEL_ENTITY arty_a7_top
+
+## --- VHDL 2008 source files (dependency order) ---
+set_global_assignment -name VHDL_FILE "../rtl/pkg/cpu_pkg.vhd"          -hdl_version VHDL_2008
+set_global_assignment -name VHDL_FILE "../rtl/pkg/axi4_pkg.vhd"         -hdl_version VHDL_2008
+set_global_assignment -name VHDL_FILE "../rtl/fetch/pc_reg.vhd"         -hdl_version VHDL_2008
+set_global_assignment -name VHDL_FILE "../rtl/fetch/branch_handler.vhd" -hdl_version VHDL_2008
+set_global_assignment -name VHDL_FILE "../rtl/fetch/decompressor.vhd"   -hdl_version VHDL_2008
+set_global_assignment -name VHDL_FILE "../rtl/fetch/fetch_stage.vhd"    -hdl_version VHDL_2008
+set_global_assignment -name VHDL_FILE "../rtl/decode/register_file.vhd" -hdl_version VHDL_2008
+set_global_assignment -name VHDL_FILE "../rtl/decode/instruction_decoder.vhd" -hdl_version VHDL_2008
+set_global_assignment -name VHDL_FILE "../rtl/decode/immediate_generator.vhd" -hdl_version VHDL_2008
+set_global_assignment -name VHDL_FILE "../rtl/decode/decode_stage.vhd"  -hdl_version VHDL_2008
+set_global_assignment -name VHDL_FILE "../rtl/execute/alu.vhd"          -hdl_version VHDL_2008
+set_global_assignment -name VHDL_FILE "../rtl/execute/branch_comparator.vhd" -hdl_version VHDL_2008
+set_global_assignment -name VHDL_FILE "../rtl/execute/forwarding_unit.vhd"   -hdl_version VHDL_2008
+set_global_assignment -name VHDL_FILE "../rtl/execute/execute_stage.vhd"     -hdl_version VHDL_2008
+set_global_assignment -name VHDL_FILE "../rtl/memory/load_store_unit.vhd"    -hdl_version VHDL_2008
+set_global_assignment -name VHDL_FILE "../rtl/memory/memory_stage.vhd"       -hdl_version VHDL_2008
+set_global_assignment -name VHDL_FILE "../rtl/writeback/writeback_stage.vhd" -hdl_version VHDL_2008
+set_global_assignment -name VHDL_FILE "../rtl/csr/csr_reg.vhd"              -hdl_version VHDL_2008
+set_global_assignment -name VHDL_FILE "../rtl/cache/icache.vhd"              -hdl_version VHDL_2008
+set_global_assignment -name VHDL_FILE "../rtl/cache/dcache.vhd"              -hdl_version VHDL_2008
+set_global_assignment -name VHDL_FILE "../rtl/mmu/mmu.vhd"                   -hdl_version VHDL_2008
+set_global_assignment -name VHDL_FILE "../rtl/clint/clint.vhd"               -hdl_version VHDL_2008
+set_global_assignment -name VHDL_FILE "../rtl/plic/plic.vhd"                 -hdl_version VHDL_2008
+set_global_assignment -name VHDL_FILE "../rtl/cpu_top.vhd"                   -hdl_version VHDL_2008
+set_global_assignment -name VHDL_FILE "arty_a7_top.vhd"                      -hdl_version VHDL_2008
+
+## --- SDC timing constraints ---
+set_global_assignment -name SDC_FILE "quartus.sdc"
+
+## --- Pin assignments (DE0-Nano) ---
+## Clock — 50 MHz on-board (PIN_R8); PLL doubles to 100 MHz in RTL
+set_location_assignment PIN_R8  -to clk_i
+set_instance_assignment  -name IO_STANDARD "3.3-V LVTTL" -to clk_i
+
+## Reset — KEY0 (active LOW on board; RTL inverts)
+set_location_assignment PIN_J15 -to btn_rst_i
+set_instance_assignment  -name IO_STANDARD "3.3-V LVTTL" -to btn_rst_i
+
+## LEDs — LED[0..3] on DE0-Nano
+set_location_assignment PIN_A15 -to "led_o[0]"
+set_location_assignment PIN_A13 -to "led_o[1]"
+set_location_assignment PIN_B13 -to "led_o[2]"
+set_location_assignment PIN_A11 -to "led_o[3]"
+set_instance_assignment  -name IO_STANDARD "3.3-V LVTTL" -to "led_o[0]"
+set_instance_assignment  -name IO_STANDARD "3.3-V LVTTL" -to "led_o[1]"
+set_instance_assignment  -name IO_STANDARD "3.3-V LVTTL" -to "led_o[2]"
+set_instance_assignment  -name IO_STANDARD "3.3-V LVTTL" -to "led_o[3]"
+
+## UART TX — GPIO_0[0] (PIN_D3) → connect to USB-serial adapter RX
+set_location_assignment PIN_D3  -to uart_tx_o
+set_instance_assignment  -name IO_STANDARD "3.3-V LVTTL" -to uart_tx_o
+
+## --- Synthesis settings ---
+set_global_assignment -name STRATIX_DEVICE_IO_STANDARD        "3.3-V LVTTL"
+set_global_assignment -name CYCLONEII_OPTIMIZATION_TECHNIQUE  SPEED
+set_global_assignment -name FITTER_EFFORT                     "STANDARD FIT"
+set_global_assignment -name PHYSICAL_SYNTHESIS_EFFORT         EXTRA
+set_global_assignment -name POWER_PRESET_COOLING_SOLUTION     "NO HEAT SINK WITH STILL AIR"
+set_global_assignment -name POWER_BOARD_THERMAL_MODEL         "NONE (CONSERVATIVE)"
+
+## --- Report options ---
+set_global_assignment -name FLOW_ENABLE_RTL_VIEWER          ON
+set_global_assignment -name EDA_SIMULATION_TOOL             "ModelSim-Altera (VHDL)"
+set_global_assignment -name EDA_TIME_SCALE                  "1 ps"            -section_id eda_simulation
+set_global_assignment -name EDA_OUTPUT_DATA_FORMAT          VHDL              -section_id eda_simulation
