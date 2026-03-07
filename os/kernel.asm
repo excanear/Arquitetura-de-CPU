@@ -25,8 +25,13 @@
 ;   [R13+5] = 0x0100 — DST_BASE (destino do loader)
 ;   [R13+6] = 0x0200 — SRC_BASE (fonte do loader)
 ;   [R13+7] = 0x0010 — N padrão (palavras a copiar = 16)
-;   [R13+8] = 0x0001 — constante 1
-;   [R13+9] = 0xFFFF — constante 0xFFFF / -1
+;   [R13+8]  = 0x0001 — constante 1
+;   [R13+9]  = 0xFFFF — constante 0xFFFF / -1
+;   [R13+10] = 0x0002 — número da syscall SYS_ALLOC
+;   [R13+11] = 0x0003 — número da syscall SYS_COPY
+;   [R13+12] = 0x0004 — número da syscall SYS_MEMSET
+;   [R13+13] = 0x0080 — endereço de HEAP_PTR_VAR (em syscalls.asm)
+;   [R13+14] = 0x0E00 — limite superior do heap
 ;
 ; Syscalls (número em R0 antes de CALL SYS_DISPATCH):
 ;   0 — SYS_HALT  : para a CPU
@@ -55,8 +60,13 @@ CONST_SYS_PRINT: .WORD 0x0001   ; [R13+4] número da syscall SYS_PRINT
 CONST_DST_BASE:  .WORD 0x0100   ; [R13+5] endereço destino do loader
 CONST_SRC_BASE:  .WORD 0x0200   ; [R13+6] endereço fonte do loader
 CONST_N:         .WORD 0x0010   ; [R13+7] número de palavras a copiar (16)
-CONST_ONE:       .WORD 0x0001   ; [R13+8] constante 1
-CONST_NEG1:      .WORD 0xFFFF   ; [R13+9] constante 0xFFFF / -1
+CONST_ONE:       .WORD 0x0001   ; [R13+8]  constante 1
+CONST_NEG1:      .WORD 0xFFFF   ; [R13+9]  constante 0xFFFF / -1
+CONST_TWO:       .WORD 0x0002   ; [R13+10] número syscall SYS_ALLOC
+CONST_THREE:     .WORD 0x0003   ; [R13+11] número syscall SYS_COPY
+CONST_FOUR:      .WORD 0x0004   ; [R13+12] número syscall SYS_MEMSET
+CONST_HEAP_PTR:  .WORD 0x0080   ; [R13+13] endereço de HEAP_PTR_VAR
+CONST_HEAP_LIM:  .WORD 0x0E00   ; [R13+14] limite superior do heap
 
 ; ===========================================================================
 ; KERNEL_START — inicialização do sistema
