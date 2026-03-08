@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-main.py — EduRISC-16 Educational CPU Lab
+main.py — EduRISC Educational CPU Lab  (EduRISC-16 Python + EduRISC-32 RTL)
 Ponto de entrada unificado para todas as ferramentas.
 
-Uso:
+Uso — ferramentas EduRISC-16 (Python):
     python main.py assemble  <arquivo.asm>  [-o saida.hex] [--binary] [--listing]
     python main.py compile   <arquivo.c>    [-o saida.asm] [--show-ast]
     python main.py build     <arquivo.c>    [-o saida.hex]
@@ -11,6 +11,11 @@ Uso:
     python main.py debug     <arquivo.hex>
     python main.py run       <arquivo.asm>  [--max-cycles N]
     python main.py demo
+
+Uso — RTL EduRISC-32 (Icarus Verilog):
+    python main.py rtl-sim  <prog.hex>           # simula RTL com iverilog
+    python main.py compare  <prog.hex>            # compara Python vs RTL
+    python main.py rtl-build                     # compila apenas o RTL
 """
 
 import sys
@@ -359,6 +364,163 @@ int main() {
 }
 """
 
+# ---------------------------------------------------------------------------
+# RTL helpers (EduRISC-32 / Icarus Verilog)
+# ---------------------------------------------------------------------------
+
+import subprocess
+import tempfile
+import shutil
+
+_RTL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "rtl_v")
+_TB_DIR  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "testbench")
+_RTL_SOURCES = [
+    "alu.v", "register_file.v", "program_counter.v",
+    "instruction_decoder.v", "control_unit.v", "hazard_unit.v",
+    "forwarding_unit.v", "pipeline_if.v", "pipeline_id.v",
+    "pipeline_ex.v", "pipeline_mem.v", "pipeline_wb.v",
+    "memory_interface.v", "cpu_top.v",
+]
+
+
+def _find_iverilog():
+    exe = shutil.which("iverilog")
+    if exe:
+        return exe
+    for p in [r"C:\iverilog\bin\iverilog.exe", "/usr/bin/iverilog", "/usr/local/bin/iverilog"]:
+        if os.path.isfile(p):
+            return p
+    return None
+
+
+def _rtl_source_files():
+    return [os.path.join(_RTL_DIR, f) for f in _RTL_SOURCES]
+
+
+def cmd_rtl_build(_args):
+    iverilog = _find_iverilog()
+    if not iverilog:
+        print("[ERRO] iverilog não encontrado — instale o Icarus Verilog.")
+        sys.exit(1)
+    sources = _rtl_source_files()
+    missing = [s for s in sources if not os.path.exists(s)]
+    if missing:
+        print("[ERRO] Arquivos RTL ausentes:"); [print(" ", m) for m in missing]
+        sys.exit(1)
+    cmd = [iverilog, "-g2012", f"-I{_RTL_DIR}", "-o", os.devnull] + sources
+    print(f"[rtl-build] Verificando {len(sources)} fontes RTL...")
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode == 0:
+        print("[rtl-build] OK — nenhum erro de sintaxe.")
+    else:
+        print("[rtl-build] FALHA:\n", r.stderr); sys.exit(1)
+
+
+def cmd_rtl_sim(args):
+    iverilog = _find_iverilog()
+    vvp_path = shutil.which("vvp")
+    if iverilog and not vvp_path:
+        vvp_path = os.path.join(os.path.dirname(iverilog), "vvp")
+        if not os.path.isfile(vvp_path):
+            vvp_path = None
+    if not iverilog or not vvp_path:
+        print("[ERRO] iverilog/vvp não encontrados — instale o Icarus Verilog."); sys.exit(1)
+
+    hex_file = os.path.abspath(args.input)
+    if not os.path.exists(hex_file):
+        print(f"[ERRO] Arquivo não encontrado: {hex_file}"); sys.exit(1)
+
+    tb_file = os.path.join(_TB_DIR, "cpu_tb.v")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        sim_out = os.path.join(tmpdir, "sim.out")
+        sources = _rtl_source_files() + [tb_file]
+        compile_cmd = [iverilog, "-g2012", f"-I{_RTL_DIR}",
+                       f'-DIMEM_INIT_FILE="{hex_file}"', "-o", sim_out] + sources
+        print("[rtl-sim] Compilando RTL...")
+        r = subprocess.run(compile_cmd, capture_output=True, text=True)
+        if r.returncode != 0:
+            print("[rtl-sim] Erro de compilação:\n", r.stderr); sys.exit(1)
+        print("[rtl-sim] Executando simulação...")
+        try:
+            r2 = subprocess.run([vvp_path, sim_out], capture_output=True, text=True,
+                                timeout=getattr(args, "timeout", 30))
+        except subprocess.TimeoutExpired:
+            print("[rtl-sim] TIMEOUT."); sys.exit(1)
+        print(r2.stdout)
+        if r2.returncode != 0:
+            print(r2.stderr)
+        vcd = os.path.join(_TB_DIR, "dump.vcd")
+        if getattr(args, "waves", False) and os.path.exists(vcd):
+            gtkwave = shutil.which("gtkwave")
+            if gtkwave:
+                subprocess.Popen([gtkwave, vcd])
+            else:
+                print(f"[rtl-sim] VCD gerado em {vcd} (gtkwave não encontrado)")
+
+
+def cmd_compare(args):
+    import re
+    from simulator import CPUSimulator
+
+    hex_file = args.input
+    if not os.path.exists(hex_file):
+        print(f"[ERRO] Arquivo não encontrado: {hex_file}"); sys.exit(1)
+
+    # Python sim
+    words = _load_hex(hex_file)
+    sim = CPUSimulator()
+    sim.load_program(words)
+    sim.run(max_cycles=500_000)
+    py_regs = list(sim.rf)
+
+    # RTL sim
+    rtl_regs = None
+    iverilog = _find_iverilog()
+    vvp_path = shutil.which("vvp")
+    if iverilog and not vvp_path:
+        vvp_path = os.path.join(os.path.dirname(iverilog), "vvp")
+        if not os.path.isfile(vvp_path):
+            vvp_path = None
+    if iverilog and vvp_path:
+        tb_file = os.path.join(_TB_DIR, "cpu_tb.v")
+        sources = _rtl_source_files() + [tb_file]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim_out = os.path.join(tmpdir, "sim.out")
+            hex_abs = os.path.abspath(hex_file)
+            compile_cmd = [iverilog, "-g2012", f"-I{_RTL_DIR}",
+                           f'-DIMEM_INIT_FILE="{hex_abs}"', "-o", sim_out] + sources
+            r = subprocess.run(compile_cmd, capture_output=True, text=True)
+            if r.returncode == 0:
+                r2 = subprocess.run([vvp_path, sim_out], capture_output=True, text=True,
+                                    timeout=30)
+                rtl_regs = [0] * 16
+                for m in re.finditer(r'R(\d+)\s*=\s*0x([0-9A-Fa-f]+)', r2.stdout):
+                    idx = int(m.group(1))
+                    if idx < 16:
+                        rtl_regs[idx] = int(m.group(2), 16)
+
+    print("=" * 62)
+    print("  Comparação EduRISC Python vs RTL")
+    print("=" * 62)
+    print(f"  {'Reg':<6}  {'Python':>12}  {'RTL':>12}  Match")
+    print("  " + "-" * 48)
+    all_match = True
+    for i in range(16):
+        pv = py_regs[i]
+        rv = rtl_regs[i] if rtl_regs is not None else None
+        match_ch = ("OK" if rv is None else ("OK" if pv == rv else "XX"))
+        if rv is not None and pv != rv:
+            all_match = False
+        rtl_str = f"0x{rv:08X}" if rv is not None else "    N/A    "
+        print(f"  R{i:<4}  0x{pv:08X}   {rtl_str}   {match_ch}")
+    if rtl_regs is None:
+        print("\n  [Nota] iverilog indisponível — apenas resultado Python exibido.")
+    elif all_match:
+        print("\n  *** TODOS OS REGISTRADORES COINCIDEM ***")
+    else:
+        print("\n  !!! DIVERGENCIAS DETECTADAS !!!")
+
+
 def cmd_demo(_args):
     from assembler  import Assembler
     from compiler   import compile_source
@@ -446,16 +608,33 @@ def main():
     # demo
     sub.add_parser("demo", help="Executa demonstração integrada")
 
+    # rtl-build
+    sub.add_parser("rtl-build", help="Verifica sintaxe do RTL EduRISC-32 com iverilog")
+
+    # rtl-sim
+    p_rtl = sub.add_parser("rtl-sim", help="Simula EduRISC-32 RTL com Icarus Verilog")
+    p_rtl.add_argument("input", help="Arquivo .hex de 32 bits (IMEM)")
+    p_rtl.add_argument("--waves", action="store_true", help="Abre GTKWave após simulação")
+    p_rtl.add_argument("--timeout", type=int, default=30, help="Timeout em segundos")
+
+    # compare
+    p_cmp = sub.add_parser("compare",
+        help="Compara registradores: simulador Python vs RTL Verilog")
+    p_cmp.add_argument("input", help="Arquivo .hex")
+
     args = parser.parse_args()
 
     dispatch = {
-        "assemble": cmd_assemble,
-        "compile":  cmd_compile,
-        "build":    cmd_build,
-        "simulate": cmd_simulate,
-        "debug":    cmd_debug,
-        "run":      cmd_run,
-        "demo":     cmd_demo,
+        "assemble":  cmd_assemble,
+        "compile":   cmd_compile,
+        "build":     cmd_build,
+        "simulate":  cmd_simulate,
+        "debug":     cmd_debug,
+        "run":       cmd_run,
+        "demo":      cmd_demo,
+        "rtl-sim":   cmd_rtl_sim,
+        "rtl-build": cmd_rtl_build,
+        "compare":   cmd_compare,
     }
     dispatch[args.command](args)
 
