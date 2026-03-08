@@ -1,6 +1,6 @@
 # O que é este projeto? (para quem não é da área)
 
-Bem-vindo! Este repositório é um **laboratório completo de como um computador funciona por dentro** — desde a explicação mais simples até chips reais funcionando em hardware.
+Bem-vindo! Este repositório é um **laboratório completo de como um computador funciona por dentro** — desde a explicação mais simples até chips reais funcionando em hardware, com direito a sistema operacional e até *virtualização*.
 
 Não precisa saber programar para entender a ideia geral. Vamos devagar. 😊
 
@@ -19,11 +19,27 @@ Um processador (CPU) funciona **exatamente assim**. Cada instrução do programa
 
 Isso se chama **pipeline** ("cano" em inglês — a instrução flui pelo cano como água).
 
-Este projeto constrói **três processadores diferentes** do zero, cada vez mais complexo e mais parecido com o de um computador real.
+Este projeto constrói **uma plataforma completa** do zero, com três camadas:
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  CAMADA 3 — HYPERVISOR                                   │
+│  "O síndico do condomínio digital"                        │
+│  Gerencia múltiplos sistemas operacionais ao mesmo tempo  │
+├─────────────────────────────────────────────────────────┤
+│  CAMADA 2 — SISTEMA OPERACIONAL                          │
+│  "O gerente do escritório"                               │
+│  Organiza processos, memória, interrupções               │
+├─────────────────────────────────────────────────────────┤
+│  CAMADA 1 — CPU (o processador em si)                    │
+│  "A linha de montagem"                                    │
+│  Executa instruções, tem cache, prevê desvios            │
+└─────────────────────────────────────────────────────────┘
+```
 
 ---
 
-## Os três projetos
+## Os quatro projetos
 
 ### 🟢 Projeto 1 — EduRISC-32v2 em Python (o simulador educacional)
 
@@ -63,7 +79,76 @@ python main.py simulate meu_programa.hex --trace
 
 ---
 
-### 🔵 Projeto 2 — EduRISC-32v2 em Hardware (chip real em Verilog)
+### � Projeto 2 — Plataforma Completa com Sistema Operacional + Hypervisor
+
+**O que é:** O mesmo hardware do Projeto 1, mas agora com um **sistema operacional** (OS) e um **hypervisor** rodando em cima da CPU.
+
+**Analogia do OS:** O processador sozinho é como um chef sem cozinheiros. O sistema operacional é o **gerente do restaurante** que:
+- Divide o tempo entre vários programas (escalonador / scheduler)
+- Aloca ingredientes (memória) para cada prato (processo)
+- Atende pedidos privilegiados dos programas (syscalls)
+- Reage a eventos externos: timer, teclas, serial (interrupts)
+
+**Analogia do Hypervisor:** E se você quiser ter dois restaurantes independentes dentro do mesmo prédio, cada um com seu próprio gerente? O **hypervisor** é o **síndico do condomínio** que:
+- Reserva uma ala separada para cada restaurante (VM = máquina virtual)
+- Garante que um restaurante não invada a cozinha do outro (isolamento de memória)
+- Decide quem usa o elevador (CPU) em cada momento (escalonamento de VMs)
+- Intercepta qualquer pedido que saia de uma ala para o prédio todo (traps / syscalls)
+
+```
+Prédio (hardware)
+   ↓
+Síndico (hypervisor)        ← o código em hypervisor/
+   ├─ Restaurante A          ← VM 0: Guest OS A (com seu próprio gerente)
+   ├─ Restaurante B          ← VM 1: Guest OS B
+   └─ Restaurante C          ← VM 2: Guest OS C
+```
+
+**Como funciona na prática:**
+
+1. **Ligar o chip** → bootloader.c inicializa UART, timer, GPIO; detecta se é simulação ou FPGA real
+2. **Hypervisor inicia** → `hv_init()` instala tabela de vetores, configura timer, cria VMs
+3. **VMs são registradas** → cada VM recebe uma fatia de 64 KB de memória *isolada*
+4. **Scheduling começa** → a cada 10.000 ciclos o timer dispara → hypervisor pausa a VM atual, salva seus 32 registradores + contador de programa, e passa para a próxima VM
+5. **Dentro de cada VM** → roda um mini sistema operacional com processos, syscalls e IRQs próprios
+
+**Intercepção de operações especiais:**
+
+| O guest tenta fazer... | O hypervisor... |
+|---|---|
+| `SYSCALL` com nº ≥ 128 | Atende como *hypercall* (pede versão do HV, ID da VM, etc.) |
+| `SYSCALL` com nº < 128 | Repassa para o handler de syscalls do próprio OS guest |
+| Acesso a memória fora da sua ala | Gera page fault → hypervisor tenta resolver ou injeta erro no OS guest |
+| Instrução ilegal | Hypervisor tenta emular; se não conseguir, sinaliza erro para o OS |
+| Timer | Pausa VM, reprograma timer, escala próxima VM |
+
+**Arquivos do sistema:**
+
+```
+hypervisor/
+  hypervisor.h       ← tipos e constantes (vm_t, vcpu_state_t, causas de trap)
+  hv_core.c          ← loop principal, inicialização, pânico
+  vm_manager.c       ← criar/destruir/pausar VMs, escalonamento
+  vm_memory.c        ← tabelas de páginas shadow, isolamento GPA→HPA
+  vm_cpu.c           ← salvar/restaurar contexto, salto ERET para guest
+  trap_handler.c     ← dispatch de todos os traps + hypercalls
+
+os/
+  kernel.c           ← kernel_main, tabela de processos
+  scheduler.c        ← round-robin, context switch
+  process.c          ← criar/terminar/esperar processos (PCB completo)
+  memory.c           ← kmalloc/kfree, heap first-fit
+  syscalls.c         ← 10 syscalls: write, malloc, free, yield, sleep, exit...
+  interrupts.c       ← registrar/dispatch IRQs, mask por fonte
+
+boot/
+  bootloader.asm     ← primeiro código: inicializa SP, BSS, IVT
+  bootloader.c       ← detecta modo (simulação vs FPGA), inicializa periféricos
+```
+
+---
+
+### 🔵 Projeto 3 — EduRISC-32v2 em Hardware (chip real em Verilog)
 
 **O que é:** A mesma CPU do Projeto 1, mas agora escrita em **Verilog** — a linguagem que engenheiros usam para descrever circuitos físicos de verdade.
 
@@ -102,11 +187,11 @@ Após gravar, os LEDs da placa piscam enquanto a CPU está executando.
 
 ---
 
-### 🔴 Projeto 3 — RV32IMAC em VHDL (CPU profissional)
+### 🔴 Projeto 4 — RV32IMAC em VHDL (CPU profissional)
 
 **O que é:** Um processador no padrão **RISC-V** — o mesmo padrão usado em chips reais de celulares, roteadores e computadores embarcados no mundo todo.
 
-**Analogia:** Os Projetos 1 e 2 eram carros de brinquedo e um carro escolar. Este é um **carro de Fórmula 1** — muito mais complexo, mais completo, mais parecido com o que roda um servidor ou um smartphone.
+**Analogia:** Os Projetos 1, 2 e 3 eram carros de brinquedo, um carro com motorista e um carro escolar. Este é um **carro de Fórmula 1** — muito mais complexo, mais completo, mais parecido com o que roda um servidor ou um smartphone.
 
 **Escrito em VHDL**, outra linguagem de hardware (diferente do Verilog, mas serve para o mesmo propósito).
 
@@ -149,7 +234,7 @@ Se um programa tenta acessar um endereço que não é seu → **Page Fault** (co
 
 ## Como funciona o mini sistema operacional
 
-O Projeto 2 inclui um pequeno OS embarcado. Ele funciona assim:
+O Projeto 3 inclui um pequeno OS embarcado (Projeto 2 vai mais fundo com hypervisor). Ele funciona assim:
 
 **1. Boot (ligar):**
 ```
@@ -211,6 +296,16 @@ Quando um programa precisa de algo do SO (escrever na tela, alocar memória, dor
 | **RISC-V** | Um padrão aberto de instruções para CPUs — qualquer um pode usar sem pagar royalties |
 | **IPC** | Instruções por ciclo — mede a eficiência da CPU (1.0 = perfeito) |
 | **ISA** | "Conjunto de instruções" — o vocabulário que a CPU entende (esta fala 57 "palavras") |
+| **Hypervisor / Hipervisor** | O "síndico do condomínio digital" — programa que gerencia múltiplos sistemas operacionais rodando simultaneamente no mesmo hardware |
+| **VM (Máquina Virtual)** | Um sistema operacional "convidado" isolado no seu próprio apartamento de memória — não sabe que tem vizinhos |
+| **vCPU** | A "CPU virtual" de cada VM — o estado completo salvo dos 32 registradores do guest quando a VM não está na vez |
+| **Hypercall** | Como a VM pede algo ao hypervisor (equivalente ao syscall para o SO) — número ≥ 128 chama o hypervisor diretamente |
+| **Tipo 1 / Bare-metal** | Hypervisor que roda **diretamente no hardware**, sem SO intermediário — é o primeiro código a rodar, tem controle total |
+| **ERET** | "Exception Return" — instrução especial que devolve a CPU ao modo convidado, pulando para o EPC salvo |
+| **GPA / HPA** | GPA = endereço de memória como o guest o vê; HPA = endereço físico real no chip; o hypervisor traduz um no outro |
+| **Shadow Page Table** | A tabela do hypervisor que mapeia memória virtual do guest → memória física real, impedindo acessos cruzados entre VMs |
+| **Context Switch (HV)** | O síndico dando a vez para outro apartamento: salva 32 registradores + PC da VM atual, restaura os da próxima |
+| **Trap** | Qualquer evento que interrompe o fluxo normal e entrega controle ao supervisor (timer, instrução ilegal, page fault, syscall) |
 
 ---
 
@@ -322,23 +417,23 @@ Se a curiosidade bateu, estes são ótimos pontos de partida:
 ## Resumo visual do projeto inteiro
 
 ```
-┌──────────────────────────────────────────────────────────────────────────────┐
-│                       O QUE ESTE PROJETO FAZ                                  │
-├─────────────────────┬────────────────────────┬──────────────────────────────┤
-│  🟢 EduRISC-32v2    │  🔵 EduRISC-32v2 RTL  │  🔴 RV32IMAC VHDL           │
-│     (Python)        │     (Verilog)           │     (VHDL)                   │
-├─────────────────────┼────────────────────────┼──────────────────────────────┤
-│  Simulação          │  Hardware real          │  CPU profissional            │
-│  32 registradores   │  30 módulos de circuito │  Padrão RISC-V               │
-│  57 instruções      │  Cache L1 I$/D$ (4KB)   │  28 módulos de circuito      │
-│  Pipeline 5 etapas  │  MMU + TLB 32 entradas  │  Caches + MMU Sv32           │
-│  Cache simulada     │  OS: kernel+scheduler   │  Suporte a Linux embarcado   │
-│  Web visualizer     │  FPGA Arty A7-35T       │  Testado com GHDL ✅         │
-│  Assembler + C      │  12 testes automáticos  │  28 units, todos passaram ✅ │
-│  Linker + Loader    │  Vivado ready           │                              │
-├─────────────────────┴────────────────────────┴──────────────────────────────┤
-│                  python main.py <comando>  ←  ponto de entrada único          │
-└──────────────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                    O QUE ESTE PROJETO FAZ                                             │
+├─────────────────────┬──────────────────────┬───────────────────────┬────────────────────────────────┤
+│  🟢 EduRISC-32v2    │  � OS + Hypervisor    │  🔵 EduRISC-32v2 RTL  │  🔴 RV32IMAC VHDL     │
+│     (Python)        │     (C bare-metal)      │     (Verilog)          │     (VHDL)             │
+├─────────────────────┼────────────────────────┼───────────────────────┼────────────────────────┤
+│  Simulação          │  Hypervisor Tipo 1      │  Hardware real         │  CPU profissional      │
+│  32 registradores   │  4 VMs simultâneas      │  31 módulos circuito   │  Padrão RISC-V         │
+│  57 instruções      │  Isolamento de memória  │  Cache L1 I$/D$ (4KB)  │  28 módulos circuito   │
+│  Pipeline 5 etapas  │  Shadow page tables     │  MMU + TLB 32 entradas │  Caches + MMU Sv32     │
+│  Cache simulada     │  6 hypercalls           │  OS: kernel+scheduler  │  Suporte Linux emb.    │
+│  Web visualizer     │  ERET context switch    │  FPGA Arty A7-35T      │  Testado com GHDL ✅   │
+│  Assembler + C      │  Trap dispatch          │  12 testes automáticos │  28 units passaram ✅  │
+│  Linker + Loader    │  Timer + IRQ handling   │  Vivado ready          │                        │
+├─────────────────────┴────────────────────────┴───────────────────────┴────────────────────────┤
+│                       python main.py <comando>  ←  ponto de entrada único                       │
+└─────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---

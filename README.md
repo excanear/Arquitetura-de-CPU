@@ -1,6 +1,6 @@
-﻿# Laboratório Completo de Arquitetura de Computadores
+﻿# Plataforma Completa de Computação — Arquitetura de CPU + OS + Hypervisor
 
-> **Repositório triplo:** CPU **EduRISC-32v2** em Verilog-2012 (microarquitetura completa com cache L1, MMU, OS, FPGA Arty A7) + laboratório educacional **EduRISC-32v2** em Python (assembler, compilador C-like, simulador, toolchain) + núcleo **RV32IMAC** em VHDL-2008 (grau Linux, Sv32, caches L1, CLINT, PLIC).
+> **Repositório quádruplo:** CPU **EduRISC-32v2** em Verilog-2012 (microarquitetura com cache L1, branch prediction, MMU, interrupt controller) + **OS** (microkernel, escalonador, gerenciamento de memória, syscalls, interrupts, processos) + **Hypervisor Tipo 1** (bare-metal, 4 VMs, context switch, shadow page tables, trap delegation) + laboratório educacional **EduRISC-32v2** em Python + núcleo **RV32IMAC** em VHDL-2008.
 
 ---
 
@@ -8,43 +8,65 @@
 
 1. [Visão Geral](#visão-geral)
 2. [Estrutura de Diretórios](#estrutura-de-diretórios)
-3. [EduRISC-32v2 — Microarquitetura RTL](#eduriscv-32v2--microarquitetura-rtl)
-4. [EduRISC-32v2 — Laboratório Python](#eduriscv-32v2--laboratório-python)
-5. [RV32IMAC — Núcleo VHDL-2008](#rv32imac--núcleo-vhdl-2008)
-6. [Início Rápido](#início-rápido)
-7. [Referências](#referências)
+3. [Camada 1 — CPU Architecture (RTL Verilog)](#camada-1--cpu-architecture-rtl-verilog)
+4. [Camada 2 — Operating System](#camada-2--operating-system)
+5. [Camada 3 — Hypervisor Tipo 1](#camada-3--hypervisor-tipo-1)
+6. [EduRISC-32v2 — Laboratório Python + Toolchain](#eduriscv-32v2--laboratório-python--toolchain)
+7. [RV32IMAC — Núcleo VHDL-2008](#rv32imac--núcleo-vhdl-2008)
+8. [Início Rápido](#início-rápido)
+9. [Fluxo Completo: C → CPU → FPGA](#fluxo-completo-c--cpu--fpga)
+10. [Referências](#referências)
 
 ---
 
 ## Visão Geral
 
 ```
-┌─────────────────────────────────────────────────────────────────────────────────┐
-│                       Arquitetura de Computadores Lab                            │
-│                                                                                  │
-│  ┌──────────────────────────┐  ┌──────────────────────┐  ┌─────────────────┐   │
-│  │   EduRISC-32v2 RTL       │  │  EduRISC-32v2 Python │  │  RV32IMAC VHDL  │   │
-│  │   (Verilog-2012)         │  │  (ferramentas)        │  │  (VHDL-2008)    │   │
-│  │                          │  │                       │  │                  │   │
-│  │  32-bit, 32 regs, 57 ins │  │  Assembler 32v2       │  │  RV32IMAC+Zicsr │   │
-│  │  Pipeline 5 estágios     │  │  Compilador C-like    │  │  Sv32 MMU       │   │
-│  │  Cache L1 I$/D$ (4KB)    │  │  Simulador Python     │  │  Caches L1      │   │
-│  │  MMU 2-nível, TLB 32     │  │  Linker + Loader      │  │  CLINT + PLIC   │   │
-│  │  Interrupt controller    │  │  Web Visualizer        │  │  GHDL verified  │   │
-│  │  OS (kernel + scheduler) │  │  Demo soma 1..5=15    │  │                  │   │
-│  │  FPGA Arty A7-35T        │  └──────────────────────┘  └─────────────────┘   │
-│  │  Performance counters    │                                                    │
-│  └──────────────────────────┘                                                    │
-│                                                                                  │
-│  Ponto de entrada unificado:  python main.py <comando>                           │
-└─────────────────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────────┐
+│                  Plataforma Completa de Computação  EduRISC-32v2                  │
+├─────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                   │
+│  CAMADA 3 — HYPERVISOR TIPO 1 (bare-metal)                                       │
+│  hypervisor/  hv_core.c  vm_manager.c  vm_memory.c  vm_cpu.c  trap_handler.c    │
+│  • 4 VMs concorrentes  • context switch completo  • shadow page tables           │
+│  • hypercalls (SYSCALL ≥ 0x80)  • preemptive round-robin  • ERET-based dispatch │
+│                              ↑  runs inside                                       │
+├─────────────────────────────────────────────────────────────────────────────────┤
+│  CAMADA 2 — OPERATING SYSTEM (microkernel)                                       │
+│  os/  kernel.c  scheduler.c  process.c  memory.c  syscalls.c  interrupts.c      │
+│  • 8 processos  • IRQ subsystem (8 fontes)  • PCB completo  • kmalloc/kfree     │
+│  • Round-robin + context save/restore  • 10 syscalls  • process_create/exit     │
+│                              ↑  runs inside                                       │
+├─────────────────────────────────────────────────────────────────────────────────┤
+│  CAMADA 1 — CPU ARCHITECTURE (RTL + boot)                                        │
+│  rtl_v/  pipeline 5 estágios  cache L1 I$/D$  MMU+TLB  interrupt controller     │
+│  boot/   bootloader.asm + bootloader.c  (UART, timer, GPIO, flash loader)        │
+│  • 32-bit / 32 regs / 57 inst  • branch prediction (2-bit BTB 64 entradas)      │
+│  • forwarding + hazard detection  • FPGA Arty A7-35T  • 30 módulos Verilog      │
+│                              ↑  hardware                                          │
+├─────────────────────────────────────────────────────────────────────────────────┤
+│  TOOLCHAIN (Python)                                                               │
+│  toolchain/  assembler.py  compiler.py  linker.py  loader.py  debugger.py       │
+│  assembler/  compiler/  simulator/  web/  (8-panel visualizer)                   │
+│                                                                                   │
+│  VERIFICATIONN                                                                    │
+│  verification/  cpu_tb.v  pipeline_tests.v  cache_tests.v  mmu_tests.v          │
+│                 hypervisor_tests.v  (10 HV scenarios)                             │
+│                                                                                   │
+│  FPGA                                          RV32IMAC (VHDL-2008)              │
+│  fpga/  syn/  top.v  constraints.xdc           rtl/  28 unidades, GHDL PASS     │
+└──────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-| Camada | Linguagem | Status | Destaque |
-|---|---|---|---|
-| EduRISC-32v2 RTL | Verilog-2012 | ✅ Completo | 30 módulos, cache, MMU, OS, FPGA |
-| EduRISC-32v2 Lab | Python 3.11+ | ✅ Completo | Assembler+Compiler+Linker+Loader+Web |
-| RV32IMAC VHDL | VHDL-2008 | ✅ Completo | 28 unidades, GHDL PASS |
+| Camada | Conteúdo | Status |
+|---|---|---|
+| Hypervisor Tipo 1 | hv_core, vm_manager, vm_memory, vm_cpu, trap_handler | ✅ Novo |
+| Operating System | kernel, scheduler, process, memory, syscalls, interrupts | ✅ Expandido |
+| CPU Architecture | 31 módulos Verilog + branch predictor BTB | ✅ Expandido |
+| Boot | bootloader.asm + bootloader.c (UART/timer/GPIO) | ✅ Novo |
+| Toolchain | assembler + compiler + linker + loader + debugger | ✅ Completo |
+| EduRISC-32v2 Python | Simulador + web visualizer (8 painéis) | ✅ Completo |
+| RV32IMAC VHDL | 28 unidades, GHDL verified | ✅ Completo |
 
 ---
 
@@ -92,24 +114,39 @@
 │   └── arty_a7.xdc               #   Constraints para Arty A7-35T
 │
 ├── boot/
-│   └── bootloader.asm            #   Bootloader ASM: init stack, CSR, BSS, IVT
+│   ├── bootloader.asm            #   Bootloader ASM: init stack, CSR, BSS, IVT
+│   └── bootloader.c              #   Bootloader C: UART, timer, GPIO, flash loader
 │
 ├── os/
 │   ├── kernel.c                   #   kernel_main, tabela de processos
 │   ├── scheduler.c                #   Context save/restore, round-robin
 │   ├── memory.c                   #   Heap first-fit (kmalloc/kfree)
-│   └── syscalls.c                 #   10 syscalls (SYS_EXIT..SYS_UPTIME)
+│   ├── syscalls.c                 #   10 syscalls (SYS_EXIT..SYS_UPTIME)
+│   ├── interrupts.c               #   IRQ registration, dispatch, pending queue
+│   └── process.c                  #   PCB management, create/exit/wait/block
+│
+├── hypervisor/
+│   ├── hypervisor.h               #   Types: vm_t, vcpu_state_t, hv_state_t
+│   ├── hv_core.c                  #   Init, main scheduling loop, panic
+│   ├── vm_manager.c               #   VM create/destroy/start/pause/schedule
+│   ├── vm_memory.c                #   Shadow page tables, GPA→HPA translation
+│   ├── vm_cpu.c                   #   vCPU save/restore, ERET trampoline
+│   └── trap_handler.c             #   Trap dispatch: timer/syscall/fault/illegal
 │
 ├── verification/
 │   ├── cpu_tb.v                   #   Testbench principal (12 testes)
 │   ├── pipeline_tests.v           #   5 testes de forwarding/stalls
 │   ├── cache_tests.v              #   3 testes I$/D$
-│   └── mmu_tests.v               #   6 testes TLB + PTW
+│   ├── mmu_tests.v               #   6 testes TLB + PTW
+│   └── hypervisor_tests.v        #   10 testes HV (traps, ERET, CSRs, timer IRQ)
 │
 ├── toolchain/
-│   ├── __init__.py               #   Exports: Linker, Loader (v2.0.0)
+│   ├── __init__.py               #   Exports: Linker, Loader, Assembler, Compiler, Debugger
 │   ├── linker.py                  #   Linker: JSON .obj → Intel HEX
-│   └── loader.py                  #   Loader: Intel HEX → .mem/.coe/vinit
+│   ├── loader.py                  #   Loader: Intel HEX → .mem/.coe/vinit
+│   ├── assembler.py               #   Assembler wrapper: .asm → .hex/.obj/.bin
+│   ├── compiler.py                #   Compiler wrapper: .c → .asm [→ .hex]
+│   └── debugger.py                #   Interactive debugger REPL + batch mode
 │
 ├── cpu/
 │   └── instruction_set.py        #   ISA EduRISC-32v2: opcodes, formatos,
@@ -149,24 +186,32 @@
 
 ---
 
-## EduRISC-32v2 — Microarquitetura RTL
+## Camada 1 — CPU Architecture (RTL Verilog)
 
-### ISA
+### ISA EduRISC-32v2
 
 - **32 bits** por instrução (6 formatos: R/I/S/B/J/U)
 - **32 registradores**: R0=zero, R30=SP, R31=LR
 - **57 instruções**: aritmética, lógica, shifts, mov, loads/stores, branches, system
 - **Espaço de endereçamento**: 26 bits → 256 MB
-- **CSRs**: STATUS, IVT, EPC, CAUSE, ESCRATCH, PTBR, TLBCTL, CYCLE, CYCLEH, INSTRET, ICOUNT, DCMISS, ICMISS, BRMISS
+- **CSRs**: STATUS, IVT, EPC, CAUSE, PTBASE, TIMECMP, IM e performance counters
 
-### Pipeline
+### Pipeline 5 estágios
 
 ```
 [IF]  →  [ID]  →  [EX]  →  [MEM]  →  [WB]
 
-Forwarding:  EX/MEM → EX,  MEM/WB → EX
-Hazards:     Load-use (1 stall),  Branch taken (1 flush), MUL (3 stalls), DIV (32 stalls)
+Forwarding:      EX/MEM → EX,  MEM/WB → EX
+Hazard detection: Load-use (1 stall),  Branch taken (1 flush)
+Mul/Div:         MUL = 3 stalls,  DIV = 32 stalls (iterativo)
+Branch prediction: BTB 64 entradas, contadores 2-bit saturantes (~88%)
 ```
+
+### Branch Predictor (novo)
+
+- **Bimodal predictor**: BTB direto com 64 entradas × 2-bit saturating counter
+- `rtl_v/branch_predictor.v`: prediction port (IF) + update port (EX)
+- Detecção automática de misprediction → flush sinal para pipeline
 
 ### Cache L1
 
@@ -175,6 +220,151 @@ Hazards:     Load-use (1 stall),  Branch taken (1 flush), MUL (3 stalls), DIV (3
 | Tamanho | 4 KB | 4 KB |
 | Organização | Direct-mapped, 256×4w | Direct-mapped, 256×4w |
 | Write policy | Read-only | Write-back + Write-allocate |
+
+---
+
+## Camada 2 — Operating System
+
+### Arquivos
+
+| Arquivo | Responsabilidade |
+|---|---|
+| `os/kernel.c` | `kernel_main()`, tabela de processos, inicialização |
+| `os/scheduler.c` | Round-robin, context save/restore, tick handler |
+| `os/process.c` | PCB management: `process_create/exit/wait/block/unblock` (NOVO) |
+| `os/memory.c` | `kmalloc/kfree`, first-fit heap |
+| `os/syscalls.c` | 10 syscalls: write, malloc, free, yield, sleep, exit, getpid, uptime, open, close |
+| `os/interrupts.c` | IRQ registration, dispatch, pending queue, per-source masking (NOVO) |
+
+### Interrupt Subsystem (novo)
+
+```c
+interrupts_init();
+irq_register(IRQ_UART_RX, uart_rx_handler, &uart_dev);
+irq_enable(IRQ_UART_RX);
+global_irq_enable();
+// → irq_dispatch() chamado pelo IVT stub com o número da IRQ
+```
+
+8 fontes de interrupção: Timer (IRQ 0), UART RX/TX, GPIO, SPI, I2C, DMA, EXT.
+
+### Process Management (novo)
+
+```c
+int pid = process_create(entry_addr, priority, "my_task");
+// processo passa por: READY → RUNNING → BLOCKED → READY → ZOMBIE → FREE
+process_exit(0);
+process_wait(child_pid, &exit_code);
+```
+
+---
+
+## Camada 3 — Hypervisor Tipo 1
+
+### Filosofia
+
+```
+Hardware (EduRISC-32v2 CPU)
+       ↓
+Hypervisor (privilegio máximo — "ring -1")
+   ├─ VM 0 → Guest OS A   (executa como "ring 0 restrito")
+   ├─ VM 1 → Guest OS B
+   ├─ VM 2 → Guest OS C
+   └─ VM 3 → Guest OS D
+```
+
+### Arquivos e Responsabilidades
+
+| Arquivo | Conteúdo |
+|---|---|
+| `hypervisor/hypervisor.h` | Tipos: `vm_t`, `vcpu_state_t`, `hv_state_t`; códigos de trap; API pública |
+| `hypervisor/hv_core.c` | `hv_init()`, `hv_main()` (loop de scheduling), `hv_panic()` |
+| `hypervisor/vm_manager.c` | `vm_create/destroy/start/pause/get`, `vm_schedule_next()` |
+| `hypervisor/vm_memory.c` | Shadow page table (64 PTEs/VM), `vm_alloc_memory`, `vm_translate` |
+| `hypervisor/vm_cpu.c` | `vcpu_init/save_state/restore_state`, `vcpu_run()` (ERET trampoline) |
+| `hypervisor/trap_handler.c` | `trap_handle()` dispatcher, hypercalls (≥0x80), fault injection |
+
+### Fluxo de Trap
+
+```
+Guest instrução → TRAP
+   hardware: EPC ← PC; CAUSE ← cause; PC ← IVT[cause]
+   IVT stub: salva GPRs → s_scratch_regs[]
+   trap_handle(cause, epc, badvaddr)
+      ┌── TIMER      → vm_schedule_next() → hv_main() → vcpu_run(next)
+      ├── SYSCALL ≥80 → hypercall handler → vcpu_run(same)
+      ├── SYSCALL <80 → inject ao guest OS → vcpu_run(same)
+      ├── PAGE_FAULT  → resolve SPT ou inject → vcpu_run(same)
+      └── ILLEGAL     → emulate CSR / inject → vcpu_run(same)
+```
+
+### Hypercalls disponíveis
+
+| Nº (R1) | Nome | Descrição |
+|---|---|---|
+| `0x80` | `HV_CALL_VERSION` | R1 ← versão do HV (0x00010000) |
+| `0x81` | `HV_CALL_VM_ID` | R1 ← ID da VM atual (0-3) |
+| `0x82` | `HV_CALL_VM_CREATE` | Criar nova VM filha |
+| `0x83` | `HV_CALL_VM_YIELD` | Ceder CPU voluntariamente |
+| `0x84` | `HV_CALL_VM_EXIT` | Terminar esta VM (R2 = exit code) |
+| `0x85` | `HV_CALL_CONSOLE_PUT` | Escrever char na console do HV |
+
+### Inicialização (via bootloader.c)
+
+```c
+// Com hipervisor (CONFIG_HYPERVISOR definido):
+hv_init();
+vm_create(0, 0x10000, 0x0, "guest-os-0");
+vm_start(0);
+hv_main();   // nunca retorna — scheduling loop infinito
+```
+
+---
+
+## EduRISC-32v2 — Laboratório Python + Toolchain
+
+### Toolchain unificada (novo/expandido)
+
+```
+C source (.c)
+   ↓  toolchain/compiler.py    (wraps compiler/compiler.py + preprocessor)
+assembly (.asm)
+   ↓  toolchain/assembler.py   (wraps assembler/assembler.py, 3 formats)
+Intel HEX (.hex) ou JSON obj
+   ↓  toolchain/linker.py      (links múltiplos .obj → single HEX)
+BRAM init (.mem / .coe / .vinit)
+   ↓  toolchain/loader.py      (converte para FPGA)
+CPU execution
+```
+
+Debugger interativo (novo):
+```bash
+python -m toolchain.debugger program.hex
+(dbg) r                   # load and run
+(dbg) b 0x0100            # breakpoint at 0x100
+(dbg) si 10               # step 10 instructions
+(dbg) pa                  # print all 32 registers
+(dbg) dis 0x0100 8        # disassemble 8 instructions at 0x100
+(dbg) m 0x8000 4          # dump 4 words from DMEM
+```
+
+### Comandos CLI (main.py)
+
+```bash
+python main.py demo                         # Demo soma 1..5=15
+python main.py assemble prog.asm -o prog.hex --listing
+python main.py compile prog.c -o prog.asm
+python main.py build prog.c -o prog.hex     # compile + assemble
+python main.py simulate prog.hex --trace
+python main.py link a.obj b.obj -o out.hex
+python main.py load out.hex -o mem.coe --format coe
+python main.py fpga-build                   # gera .bit para Arty A7
+python main.py debug prog.hex               # inicia debugger REPL
+```
+
+---
+
+## RV32IMAC — Núcleo VHDL-2008
 
 ### MMU / TLB
 
