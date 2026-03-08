@@ -5,10 +5,10 @@ from compiler.ast_nodes import (
     VarDecl, Assign, IfStmt, WhileStmt, ReturnStmt, ExprStmt,
     IntLiteral, VarRef, BinOp, UnaryOp, FuncCall,
 )
-from compiler.compiler import compile_source, CompileError
+from compiler.compiler import compile_source, parse_source, CompileError
 
 __all__ = [
-    "compile_source", "CompileError",
+    "compile_source", "parse_source", "CompileError",
     "Program", "FuncDef", "Block",
     "VarDecl", "Assign", "IfStmt", "WhileStmt", "ReturnStmt", "ExprStmt",
     "IntLiteral", "VarRef", "BinOp", "UnaryOp", "FuncCall",

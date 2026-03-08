@@ -334,6 +334,7 @@ class CodeGen:
         self._data_base: int            = 0    # endereço base da seção de dados
         self._label_cnt: int            = 0
         self._pool_initialized: bool    = False  # R13 já foi inicializado?
+        self._current_func_name: str    = ""   # nome da função sendo compilada
 
     # ---- Interface pública ------------------------------------------------
 
@@ -379,6 +380,7 @@ class CodeGen:
         self._var_reg  = {}
         self._next_reg = 0
         self._pool_initialized = False
+        self._current_func_name = func.name.upper()
 
         # Aloca parâmetros
         for p in func.params:
@@ -386,13 +388,11 @@ class CodeGen:
 
         self._emit(f"; --- Função {func.name} ---")
         self._emit(f"{func.name.upper()}:")
-        # Inicializa ponteiro do pool: R13 = mem[R0+1] = 0x200  (R0=0 no início)
-        # Feito na primeira carga de literal, para não desperdiçar ciclos em funções sem literais
 
         for stmt in func.body:
             self._gen_stmt(stmt)
 
-        # Fallthrough HLT para main, RET para outras
+        # Fallthrough: HLT para main (caso não haja return explícito), RET para outras
         if func.name.upper() == "MAIN":
             self._emit("HLT")
         else:
@@ -439,7 +439,11 @@ class CodeGen:
                     if r != 0:
                         self._emit(f"XOR R0, R0, R0  ; zera R0 para retorno")
                         self._emit(f"ADD R0, R{r}, R0  ; retorno em R0")
-                self._emit("RET")
+                # main usa HLT; outras funcões usam RET
+                if self._current_func_name == "MAIN":
+                    self._emit("HLT")
+                else:
+                    self._emit("RET")
 
             case ExprStmt(expr=expr):
                 self._gen_expr(expr)
@@ -549,9 +553,10 @@ class CodeGen:
             self._emit(f"XOR R{rd}, R{rd}, R{rd}")
             self._emit(f"JMP {lbl_e}")
             self._emit(f"{lbl_t}:")
-            # verdadeiro → rd = 1
+            # verdadeiro -> rd = 1
             lit_one = self._load_literal(1, line)
-            self._emit(f"ADD R{rd}, R{lit_one}, R0  ; rd = 1")
+            self._emit(f"XOR R{rd}, R{rd}, R{rd}  ; rd = 0")
+            self._emit(f"ADD R{rd}, R{lit_one}, R{rd}  ; rd = 1")
             self._emit(f"{lbl_e}:")
         else:
             raise CompileError(f"Operador não suportado: {op}", line)
@@ -563,13 +568,22 @@ class CodeGen:
         rd = self._alloc_temp(line)
         match op:
             case "-":
-                # negativo: SUB rd, R0, r  (precisa R0=0)
-                self._emit(f"XOR R0, R0, R0  ; R0 = 0")
-                self._emit(f"SUB R{rd}, R0, R{r}  ; negação")
+                # 0 - r: usa rd como scratch (nao toca R0)
+                self._emit(f"XOR R{rd}, R{rd}, R{rd}  ; R{rd} = 0")
+                self._emit(f"SUB R{rd}, R{rd}, R{r}  ; R{rd} = -R{r}")
             case "~":
                 self._emit(f"NOT R{rd}, R{r}")
             case "!":
-                self._emit(f"XOR R{rd}, R{r}, R{r}  ; NOT lógico (0 se != 0)")
+                # !r: 1 se r==0, 0 se r!=0
+                ft = self._FLAGS_TMP
+                lbl_e = self._new_label("NOT_E")
+                self._emit(f"XOR R{rd}, R{rd}, R{rd}  ; rd = 0 (assume !r = falso)")
+                self._emit(f"XOR R{ft}, R{ft}, R{ft}  ; ft = 0")
+                self._emit(f"ADD R{ft}, R{r}, R{ft}   ; flags <- R{r}")
+                self._emit(f"JNZ {lbl_e}              ; r != 0 -> resultado ja eh 0")
+                lit_one = self._load_literal(1, line)
+                self._emit(f"ADD R{rd}, R{rd}, R{lit_one}  ; rd = 0+1 = 1")
+                self._emit(f"{lbl_e}:")
         return rd
 
     # ---- Helpers ----------------------------------------------------------
@@ -650,3 +664,10 @@ def compile_source(source: str) -> str:
     """Compila código C-like e retorna string assembly EduRISC-16."""
     cg = CodeGen()
     return cg.compile(source)
+
+
+def parse_source(source: str):
+    """Faz o parsing do codigo fonte e retorna o AST (Program)."""
+    tokens  = _lex(source)
+    parser  = _Parser(tokens)
+    return parser.parse_program()

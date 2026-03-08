@@ -139,14 +139,15 @@ class ForwardingUnit:
         fwd_b = 0
 
         # Forward de EX/MEM → EX (prioridade maior)
-        if exmem.valid and exmem.ctrl.reg_write and exmem.rd != 0:
+        # Nota: sem guarda rd!=0 — em EduRISC-16 R0 é registrador normal (≠ RISC-V)
+        if exmem.valid and exmem.ctrl.reg_write:
             if exmem.rd == idex.rs1:
                 fwd_a = 2
             if exmem.rd == idex.rs2:
                 fwd_b = 2
 
         # Forward de MEM/WB → EX
-        if memwb.valid and memwb.ctrl.reg_write and memwb.rd != 0:
+        if memwb.valid and memwb.ctrl.reg_write:
             if memwb.rd == idex.rs1 and fwd_a == 0:
                 fwd_a = 1
             if memwb.rd == idex.rs2 and fwd_b == 0:

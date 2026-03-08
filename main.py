@@ -32,6 +32,66 @@ def _load_hex(path: str) -> list[int]:
     return words
 
 
+def _print_ast(node, indent: int = 0):
+    """Imprime o AST de forma recursiva e legivel."""
+    pad = "  " * indent
+    name = type(node).__name__
+    from compiler.ast_nodes import (
+        Program, FuncDef, VarDecl, Assign, IfStmt, WhileStmt,
+        ReturnStmt, ExprStmt, Block, BinOp, UnaryOp, VarRef,
+        IntLiteral, FuncCall
+    )
+    match node:
+        case Program(functions=funcs):
+            print(f"{pad}Program")
+            for f in funcs: _print_ast(f, indent + 1)
+        case FuncDef(name=n, params=p, body=b):
+            print(f"{pad}FuncDef '{n}' params={p}")
+            for s in b: _print_ast(s, indent + 1)
+        case VarDecl(name=n, init=init):
+            print(f"{pad}VarDecl '{n}'")
+            if init: _print_ast(init, indent + 1)
+        case Assign(name=n, value=v):
+            print(f"{pad}Assign '{n}'")
+            _print_ast(v, indent + 1)
+        case IfStmt(cond=c, then_body=t, else_body=e):
+            print(f"{pad}If")
+            _print_ast(c, indent + 1)
+            print(f"{pad}  Then:")
+            for s in t: _print_ast(s, indent + 2)
+            if e:
+                print(f"{pad}  Else:")
+                for s in e: _print_ast(s, indent + 2)
+        case WhileStmt(cond=c, body=b):
+            print(f"{pad}While")
+            _print_ast(c, indent + 1)
+            for s in b: _print_ast(s, indent + 1)
+        case ReturnStmt(value=v):
+            print(f"{pad}Return")
+            if v: _print_ast(v, indent + 1)
+        case ExprStmt(expr=e):
+            print(f"{pad}ExprStmt")
+            _print_ast(e, indent + 1)
+        case Block(stmts=ss):
+            for s in ss: _print_ast(s, indent)
+        case BinOp(op=op, left=l, right=r):
+            print(f"{pad}BinOp '{op}'")
+            _print_ast(l, indent + 1)
+            _print_ast(r, indent + 1)
+        case UnaryOp(op=op, operand=o):
+            print(f"{pad}UnaryOp '{op}'")
+            _print_ast(o, indent + 1)
+        case VarRef(name=n):
+            print(f"{pad}VarRef '{n}'")
+        case IntLiteral(value=v):
+            print(f"{pad}IntLiteral {v}")
+        case FuncCall(name=n, args=a):
+            print(f"{pad}FuncCall '{n}'")
+            for arg in a: _print_ast(arg, indent + 1)
+        case _:
+            print(f"{pad}{name}")
+
+
 def _load_bin(path: str) -> list[int]:
     """Carrega arquivo binário (big-endian, 2 bytes por palavra)."""
     data = open(path, "rb").read()
@@ -79,7 +139,7 @@ def cmd_assemble(args):
 # ---------------------------------------------------------------------------
 
 def cmd_compile(args):
-    from compiler import compile_source, CompileError
+    from compiler import compile_source, parse_source, CompileError
 
     src_path = args.input
     if not os.path.exists(src_path):
@@ -87,6 +147,15 @@ def cmd_compile(args):
         sys.exit(1)
 
     source = open(src_path, encoding="utf-8").read()
+
+    if getattr(args, "show_ast", False):
+        try:
+            ast = parse_source(source)
+        except CompileError as e:
+            print(f"[ERRO Parser] {e}", file=sys.stderr)
+            sys.exit(1)
+        _print_ast(ast)
+        return
 
     try:
         asm_code = compile_source(source)
@@ -352,7 +421,7 @@ def main():
     p_cc = sub.add_parser("compile", help="Compila arquivo .c → .asm")
     p_cc.add_argument("input")
     p_cc.add_argument("-o", "--output")
-    p_cc.add_argument("--show-ast", action="store_true", help="Imprime AST")
+    p_cc.add_argument("--show-ast", action="store_true", help="Imprime AST e sai")
 
     # build
     p_build = sub.add_parser("build", help="Compila + monta .c → .hex")
