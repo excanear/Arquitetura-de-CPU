@@ -1,21 +1,24 @@
 #!/usr/bin/env python3
 """
-main.py — EduRISC Educational CPU Lab  (EduRISC-16 Python + EduRISC-32 RTL)
+main.py — EduRISC-32v2 Educational CPU Lab
 Ponto de entrada unificado para todas as ferramentas.
 
-Uso — ferramentas EduRISC-16 (Python):
+Uso — ferramentas EduRISC-32v2 (Python):
     python main.py assemble  <arquivo.asm>  [-o saida.hex] [--binary] [--listing]
     python main.py compile   <arquivo.c>    [-o saida.asm] [--show-ast]
     python main.py build     <arquivo.c>    [-o saida.hex]
     python main.py simulate  <arquivo.hex>  [--max-cycles N] [--trace]
     python main.py debug     <arquivo.hex>
     python main.py run       <arquivo.asm>  [--max-cycles N]
+    python main.py link      <obj1> [obj2...] -o prog.hex
+    python main.py load      <prog.hex> [--format mem|coe|vinit] [-o saida]
     python main.py demo
 
-Uso — RTL EduRISC-32 (Icarus Verilog):
-    python main.py rtl-sim  <prog.hex>           # simula RTL com iverilog
-    python main.py compare  <prog.hex>            # compara Python vs RTL
-    python main.py rtl-build                     # compila apenas o RTL
+Uso — RTL EduRISC-32v2 (Icarus Verilog):
+    python main.py rtl-sim   <prog.hex>           # simula RTL com iverilog
+    python main.py compare   <prog.hex>           # compara Python vs RTL
+    python main.py rtl-build                      # compila apenas o RTL
+    python main.py fpga-build                     # gera bitstream via Vivado batch
 """
 
 import sys
@@ -98,11 +101,11 @@ def _print_ast(node, indent: int = 0):
 
 
 def _load_bin(path: str) -> list[int]:
-    """Carrega arquivo binário (big-endian, 2 bytes por palavra)."""
+    """Carrega arquivo binário (big-endian, 4 bytes por palavra de 32 bits)."""
     data = open(path, "rb").read()
     words = []
-    for i in range(0, len(data) - 1, 2):
-        words.append((data[i] << 8) | data[i+1])
+    for i in range(0, len(data) - 3, 4):
+        words.append((data[i] << 24) | (data[i+1] << 16) | (data[i+2] << 8) | data[i+3])
     return words
 
 
@@ -128,7 +131,7 @@ def cmd_assemble(args):
         sys.exit(1)
 
     if args.listing:
-        print(asm.listing(words, source))
+        print(asm.listing(words))
 
     out = args.output or (src_path.rsplit(".", 1)[0] + (".bin" if args.binary else ".hex"))
     if args.binary:
@@ -252,11 +255,11 @@ def cmd_simulate(args):
     print(f"  Flushes:     {st.flushes}")
     ipc = st.instructions / max(1, st.cycles)
     print(f"  IPC:         {ipc:.3f}")
-    print(f"\n  Registradores finais:")
-    for i in range(16):
+    print(f"\n  Registradores finais (n\u00e3o-zero):")
+    for i in range(32):
         v = sim.rf[i]
         if v:
-            print(f"    R{i:2d} = 0x{v:04X}  ({v})")
+            print(f"    R{i:2d} = 0x{v:08X}  ({v})")
 
     if args.trace:
         print("\n=== Log de Eventos ===")
@@ -289,7 +292,7 @@ def cmd_debug(args):
         words = _load_hex(path)
         syms  = {}
 
-    sim = CPUSimulator()
+    sim = CPUSimulator(num_regs=32)
     sim.load_program(words)
     dbg = Debugger(sim, symbols=syms)
     dbg.run_interactive()
@@ -312,7 +315,7 @@ def cmd_run(args):
     asm   = Assembler()
     words = asm.assemble(src)
 
-    sim = CPUSimulator()
+    sim = CPUSimulator(num_regs=32)
     sim.load_program(words)
 
     max_cycles = args.max_cycles or 10_000
@@ -320,10 +323,11 @@ def cmd_run(args):
 
     st = sim.stats
     print(f"Ciclos: {st.cycles}  |  Instruções: {st.instructions}")
-    print("Registradores:")
-    for i in range(16):
+    print("Registradores (n\u00e3o-zero):")
+    for i in range(32):
         v = sim.rf[i]
-        print(f"  R{i:2d} = 0x{v:04X}  ({v})", end="  " if i % 4 != 3 else "\n")
+        if v:
+            print(f"  R{i:2d} = 0x{v:08X}  ({v})", end="  " if i % 4 != 3 else "\n")
 
 
 # ---------------------------------------------------------------------------
@@ -331,34 +335,24 @@ def cmd_run(args):
 # ---------------------------------------------------------------------------
 
 _DEMO_ASM = """\
-; Demo: soma de 1 a 5 = 15
-        .ORG 0x000
-        LOAD R4, [R0+8]    ; R4 = endereço base da área de dados (0x010)
-        LOAD R1, [R4+0]    ; R1 = 5
-        LOAD R2, [R4+1]    ; R2 = 0 (acc)
-        LOAD R3, [R4+2]    ; R3 = 1
-LOOP:   ADD  R2, R2, R1    ; acc += i
-        SUB  R1, R1, R3    ; i--
-        JNZ  LOOP
+; Demo EduRISC-32v2: soma de 1 a 5 = 15
+        .org 0x000000
+        MOVI  R1, 5        ; R1 = n = 5
+        MOVI  R2, 0        ; R2 = acc = 0
+LOOP:
+        ADD   R2, R2, R1   ; acc += n
+        ADDI  R1, R1, -1   ; n--
+        BNE   R1, R0, LOOP ; enquanto n != 0
         HLT
-
-        .ORG 0x008
-        .WORD 0x010        ; endereço base (pointer para dados)
-
-        .ORG 0x010
-        .WORD 5
-        .WORD 0
-        .WORD 1
 """
 
 _DEMO_C = """\
 int main() {
     int n = 5;
     int acc = 0;
-    int one = 1;
     while (n) {
         acc = acc + n;
-        n = n - one;
+        n = n - 1;
     }
     return acc;
 }
@@ -374,13 +368,22 @@ import shutil
 
 _RTL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "rtl_v")
 _TB_DIR  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "testbench")
-_RTL_SOURCES = [
-    "alu.v", "register_file.v", "program_counter.v",
-    "instruction_decoder.v", "control_unit.v", "hazard_unit.v",
-    "forwarding_unit.v", "pipeline_if.v", "pipeline_id.v",
-    "pipeline_ex.v", "pipeline_mem.v", "pipeline_wb.v",
-    "memory_interface.v", "cpu_top.v",
+_RTL_SOURCES_FLAT = [
+    "isa_pkg.vh",
+    "register_file.v", "program_counter.v",
+    "execute/alu.v", "execute/multiplier.v", "execute/divider.v", "execute/branch_unit.v",
+    "decode/instruction_decoder.v", "control/control_unit.v",
+    "hazard/hazard_unit.v", "execute/forwarding_unit.v",
+    "pipeline_if.v", "pipeline_id.v", "pipeline_ex.v", "pipeline_mem.v", "pipeline_wb.v",
+    "cache/icache.v", "cache/dcache.v", "cache/cache_controller.v",
+    "mmu/tlb.v", "mmu/page_table.v", "mmu/mmu.v",
+    "interrupts/interrupt_controller.v", "interrupts/exception_handler.v",
+    "memory_interface.v", "perf_counters.v", "cpu_top.v",
 ]
+
+
+def _rtl_source_files():
+    return [os.path.join(_RTL_DIR, f) for f in _RTL_SOURCES_FLAT if not f.endswith(".vh")]
 
 
 def _find_iverilog():
@@ -393,8 +396,7 @@ def _find_iverilog():
     return None
 
 
-def _rtl_source_files():
-    return [os.path.join(_RTL_DIR, f) for f in _RTL_SOURCES]
+
 
 
 def cmd_rtl_build(_args):
@@ -458,6 +460,96 @@ def cmd_rtl_sim(args):
                 print(f"[rtl-sim] VCD gerado em {vcd} (gtkwave não encontrado)")
 
 
+# ---------------------------------------------------------------------------
+# Comando: link
+# ---------------------------------------------------------------------------
+
+def cmd_link(args):
+    from toolchain import Linker, LinkerError
+
+    if not args.files:
+        print("[ERRO] Nenhum arquivo objeto fornecido.", file=sys.stderr); sys.exit(1)
+
+    out = args.output or "out.hex"
+    lnk = Linker()
+    for f in args.files:
+        if not os.path.exists(f):
+            print(f"[ERRO] Arquivo não encontrado: {f}", file=sys.stderr); sys.exit(1)
+        try:
+            lnk.add_object(f)
+        except LinkerError as e:
+            print(f"[ERRO Linker] {e}", file=sys.stderr); sys.exit(1)
+
+    try:
+        lnk.link(out)
+    except LinkerError as e:
+        print(f"[ERRO Linker] {e}", file=sys.stderr); sys.exit(1)
+
+    print(f"Linker OK — saída: {out}")
+
+
+# ---------------------------------------------------------------------------
+# Comando: load (hex → mem/coe/vinit)
+# ---------------------------------------------------------------------------
+
+def cmd_load(args):
+    from toolchain import Loader, LoaderError
+
+    if not os.path.exists(args.input):
+        print(f"[ERRO] Arquivo não encontrado: {args.input}", file=sys.stderr); sys.exit(1)
+
+    try:
+        loader = Loader()
+        loader.load_hex(args.input)
+    except LoaderError as e:
+        print(f"[ERRO Loader] {e}", file=sys.stderr); sys.exit(1)
+
+    fmt = getattr(args, "format", "mem")
+    base = os.path.splitext(args.output or args.input)[0]
+
+    if fmt == "coe":
+        out = (args.output or base + ".coe")
+        loader.write_coe(out)
+    elif fmt == "vinit":
+        out = (args.output or base + "_init.v")
+        loader.write_verilog_init(out)
+    else:  # mem
+        out = (args.output or base + ".mem")
+        loader.write_mem(out)
+
+    print(f"Loader OK [{fmt}] — saída: {out}  ({len(loader.to_mem_list())} words)")
+
+
+# ---------------------------------------------------------------------------
+# Comando: fpga-build
+# ---------------------------------------------------------------------------
+
+def cmd_fpga_build(_args):
+    vivado = shutil.which("vivado")
+    if not vivado:
+        for p in [r"C:\Xilinx\Vivado\2023.2\bin\vivado.bat",
+                  r"C:\Xilinx\Vivado\2022.2\bin\vivado.bat"]:
+            if os.path.exists(p):
+                vivado = p
+                break
+    if not vivado:
+        print("[ERRO] Vivado não encontrado. Adicione ao PATH ou instale.")
+        sys.exit(1)
+
+    tcl = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fpga", "build.tcl")
+    if not os.path.exists(tcl):
+        print(f"[ERRO] Script Tcl não encontrado: {tcl}"); sys.exit(1)
+
+    print(f"[fpga-build] Executando Vivado batch: {tcl}")
+    r = subprocess.run([vivado, "-mode", "batch", "-source", tcl],
+                       capture_output=False, text=True)
+    if r.returncode == 0:
+        print("[fpga-build] Bitstream gerado com sucesso.")
+    else:
+        print(f"[fpga-build] FALHA (código {r.returncode}).")
+        sys.exit(1)
+
+
 def cmd_compare(args):
     import re
     from simulator import CPUSimulator
@@ -505,14 +597,15 @@ def cmd_compare(args):
     print(f"  {'Reg':<6}  {'Python':>12}  {'RTL':>12}  Match")
     print("  " + "-" * 48)
     all_match = True
-    for i in range(16):
-        pv = py_regs[i]
-        rv = rtl_regs[i] if rtl_regs is not None else None
+    for i in range(32):
+        pv = py_regs[i] if i < len(py_regs) else 0
+        rv = rtl_regs[i] if rtl_regs is not None and i < len(rtl_regs) else None
         match_ch = ("OK" if rv is None else ("OK" if pv == rv else "XX"))
         if rv is not None and pv != rv:
             all_match = False
         rtl_str = f"0x{rv:08X}" if rv is not None else "    N/A    "
-        print(f"  R{i:<4}  0x{pv:08X}   {rtl_str}   {match_ch}")
+        if pv or (rv is not None and rv != 0):
+            print(f"  R{i:<4}  0x{pv:08X}   {rtl_str}   {match_ch}")
     if rtl_regs is None:
         print("\n  [Nota] iverilog indisponível — apenas resultado Python exibido.")
     elif all_match:
@@ -551,11 +644,12 @@ def cmd_demo(_args):
 
     try:
         words2 = asm.assemble(asm_code)
-        sim2   = CPUSimulator()
+        sim2   = CPUSimulator(num_regs=32)
         sim2.load_program(words2)
         sim2.run(max_cycles=5000)
         st2 = sim2.stats
-        print(f"Resultado em R0 = {sim2.rf[0]}  (esperado: 15)")
+        # Resultado da função main em R1 (ABI EduRISC-32v2)
+        print(f"Resultado em R1 = {sim2.rf[1]}  (esperado: 15)")
     except Exception as e:
         print(f"[Nota] Simulação do código compilado: {e}")
 
@@ -567,7 +661,7 @@ def cmd_demo(_args):
 def main():
     parser = argparse.ArgumentParser(
         prog="edurisclab",
-        description="EduRISC-16 Educational CPU Lab",
+        description="EduRISC-32v2 Educational CPU Lab",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     sub = parser.add_subparsers(dest="command", required=True)
@@ -622,19 +716,37 @@ def main():
         help="Compara registradores: simulador Python vs RTL Verilog")
     p_cmp.add_argument("input", help="Arquivo .hex")
 
+    # link
+    p_lnk = sub.add_parser("link", help="Liga arquivos objeto .json → Intel HEX")
+    p_lnk.add_argument("files", nargs="+", help="Arquivos objeto (.json)")
+    p_lnk.add_argument("-o", "--output", help="Arquivo de saída (.hex)")
+
+    # load
+    p_ld = sub.add_parser("load", help="Converte Intel HEX → mem/coe/vinit")
+    p_ld.add_argument("input", help="Arquivo Intel HEX")
+    p_ld.add_argument("-o", "--output", help="Arquivo de saída")
+    p_ld.add_argument("--format", choices=["mem", "coe", "vinit"], default="mem",
+                      help="Formato de saída (padrão: mem)")
+
+    # fpga-build
+    sub.add_parser("fpga-build", help="Gera bitstream para Arty A7 via Vivado batch")
+
     args = parser.parse_args()
 
     dispatch = {
-        "assemble":  cmd_assemble,
-        "compile":   cmd_compile,
-        "build":     cmd_build,
-        "simulate":  cmd_simulate,
-        "debug":     cmd_debug,
-        "run":       cmd_run,
-        "demo":      cmd_demo,
-        "rtl-sim":   cmd_rtl_sim,
-        "rtl-build": cmd_rtl_build,
-        "compare":   cmd_compare,
+        "assemble":   cmd_assemble,
+        "compile":    cmd_compile,
+        "build":      cmd_build,
+        "simulate":   cmd_simulate,
+        "debug":      cmd_debug,
+        "run":        cmd_run,
+        "demo":       cmd_demo,
+        "rtl-sim":    cmd_rtl_sim,
+        "rtl-build":  cmd_rtl_build,
+        "compare":    cmd_compare,
+        "link":       cmd_link,
+        "load":       cmd_load,
+        "fpga-build": cmd_fpga_build,
     }
     dispatch[args.command](args)
 

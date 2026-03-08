@@ -312,28 +312,27 @@ class _Parser:
 
 class CodeGen:
     """
-    Gera código assembly EduRISC-16 a partir do AST.
+    Gera código assembly EduRISC-32v2 a partir do AST.
 
     Estratégia:
-      - Variáveis locais são alocadas em registradores R0–R12.
-      - Literais inteiros são carregados via LOAD de uma área de dados (.DATA).
-      - Temporários extra são derramados (spill) se > 13 variáveis (erro).
+      - Variáveis locais são alocadas em registradores R1–R25.
+      - R0  = zero hardwired (constante 0).
+      - R30 = SP (stack pointer), R31 = LR (link register).
+      - Literais inteiros ≤ 16 bits são carregados via MOVI.
+      - Literais 32 bits usam MOVHI + ORI.
+      - Temporários extras causam erro se > _MAX_REGS variáveis.
       - Cada função gera uma seção de labels com nome da função.
     """
 
-    _MAX_REGS  = 13   # R0–R12 disponíveis para variáveis
-    _POOL_PTR  = 13   # R13 reservado como ponteiro do pool de literais
-    _FLAGS_TMP = 14   # R14 reservado como temp para teste de flags
-    _POOL_ADDR = 0x200  # endereço fixo do pool de literais
+    _MAX_REGS  = 25   # R1–R25 disponíveis para variáveis (R0=zero, R26-R29=temps, R30=sp, R31=lr)
+    _FIRST_REG = 1    # primeiro reg disponível para alocação (R0 é sempre zero)
+    _FLAGS_TMP = 26   # R26 reservado como scratch temporário de comparações
 
     def __init__(self):
         self._lines:    list[str]       = []
         self._var_reg:  dict[str, int]  = {}   # nome → número de reg
-        self._next_reg: int             = 0
-        self._data:     list[int]       = []   # pool de literais
-        self._data_base: int            = 0    # endereço base da seção de dados
+        self._next_reg: int             = self._FIRST_REG
         self._label_cnt: int            = 0
-        self._pool_initialized: bool    = False  # R13 já foi inicializado?
         self._current_func_name: str    = ""   # nome da função sendo compilada
 
     # ---- Interface pública ------------------------------------------------
@@ -348,29 +347,17 @@ class CodeGen:
     # ---- Geração de programa ----------------------------------------------
 
     def _gen_program(self, prog: Program) -> str:
-        self._lines   = []
-        self._data    = []
+        self._lines     = []
         self._label_cnt = 0
-        self._pool_initialized = False
 
-        # Pula para main; word 1 guarda o endereço do pool (para LOAD R13, [R0+1])
-        self._emit(".ORG 0x000")
+        # Pula para main
+        self._emit(".org 0x000000")
         self._emit("JMP MAIN")
-        self._emit(f".WORD 0x{self._POOL_ADDR:04X}  ; ponteiro do pool de literais")
         self._emit("")
 
         # Gera código de cada função
         for func in prog.functions:
             self._gen_func(func)
-
-        # Seção de dados literais (após o código)
-        if self._data:
-            data_addr = len(self._lines) + 2  # estimativa
-            self._emit("")
-            self._emit(f"; === POOL DE LITERAIS ===")
-            self._emit(f".ORG 0x200")
-            for i, val in enumerate(self._data):
-                self._emit(f"__LIT_{i}: .WORD {val}")
 
         self._emit("")
         self._emit("; === FIM DO PROGRAMA ===")
@@ -378,8 +365,7 @@ class CodeGen:
 
     def _gen_func(self, func: FuncDef):
         self._var_reg  = {}
-        self._next_reg = 0
-        self._pool_initialized = False
+        self._next_reg = self._FIRST_REG
         self._current_func_name = func.name.upper()
 
         # Aloca parâmetros
@@ -408,23 +394,16 @@ class CodeGen:
                 if init is not None:
                     r = self._gen_expr(init)
                     if r != reg:
-                        # Copia R{r} para R{reg}: XOR Rd,Rd,Rd; ADD Rd,Rs,Rd
-                        self._emit(f"XOR R{reg}, R{reg}, R{reg}  ; zera R{reg}")
-                        self._emit(f"ADD R{reg}, R{r}, R{reg}  ; R{reg} = R{r}")
+                        self._emit(f"MOV R{reg}, R{r}  ; {name} = R{r}")
 
             case Assign(name=name, value=value, line=line):
                 reg = self._get_var(name, line)
-                # Otimização: se o valor é uma BinOp, gera diretamente no registrador destino
                 if isinstance(value, BinOp):
                     r = self._gen_binop_into(value.op, value.left, value.right, value.line, reg)
                 else:
                     r = self._gen_expr(value)
                     if r != reg:
-                        # Copia R{r} para R{reg} usando NOT+NOT ou XOR+ADD
-                        # NOT NOT Rs = Rs; mas precisamos de dois regs diferentes
-                        # Usa: XOR Rd,Rd,Rd; ADD Rd,Rs,Rd
-                        self._emit(f"XOR R{reg}, R{reg}, R{reg}  ; zera R{reg}")
-                        self._emit(f"ADD R{reg}, R{r}, R{reg}  ; {name} = R{r}")
+                        self._emit(f"MOV R{reg}, R{r}  ; {name} = R{r}")
 
             case IfStmt(cond=cond, then_body=then_b, else_body=else_b, line=line):
                 self._gen_if(cond, then_b, else_b)
@@ -435,11 +414,10 @@ class CodeGen:
             case ReturnStmt(value=val, line=line):
                 if val is not None:
                     r = self._gen_expr(val)
-                    # convenção: resultado em R0
-                    if r != 0:
-                        self._emit(f"XOR R0, R0, R0  ; zera R0 para retorno")
-                        self._emit(f"ADD R0, R{r}, R0  ; retorno em R0")
-                # main usa HLT; outras funcões usam RET
+                    # convenção: resultado em R1
+                    if r != 1:
+                        self._emit(f"MOV R1, R{r}  ; retorno em R1")
+                # main usa HLT; outras funções usam RET
                 if self._current_func_name == "MAIN":
                     self._emit("HLT")
                 else:
@@ -459,8 +437,8 @@ class CodeGen:
         lbl_end  = self._new_label("ENDIF")
 
         r_cond = self._gen_expr(cond)
-        self._ensure_flags(r_cond, cond)
-        self._emit(f"JZ {lbl_else}  ; if falso → else")
+        # BEQ r_cond, R0, else_label  (se cond == 0 → falso → pula para else)
+        self._emit(f"BEQ R{r_cond}, R0, {lbl_else}  ; if falso → else")
 
         for s in then_b:
             self._gen_stmt(s)
@@ -479,8 +457,7 @@ class CodeGen:
 
         self._emit(f"{lbl_test}:")
         r_cond = self._gen_expr(cond)
-        self._ensure_flags(r_cond, cond)
-        self._emit(f"JZ {lbl_end}  ; enquanto falso → fim")
+        self._emit(f"BEQ R{r_cond}, R0, {lbl_end}  ; enquanto falso → fim")
 
         for s in body:
             self._gen_stmt(s)
@@ -508,8 +485,8 @@ class CodeGen:
             case FuncCall(name=name, args=args, line=line):
                 # Sem parâmetros por hora
                 self._emit(f"CALL {name.upper()}")
-                # Resultado em R0 por convenção
-                return 0
+                # Resultado em R1 por convenção ABI EduRISC-32v2
+                return 1
 
             case _:
                 raise CompileError(f"Expressão não suportada: {type(expr).__name__}", 0)
@@ -529,34 +506,44 @@ class CodeGen:
 
         OP_MAP = {"+": "ADD", "-": "SUB", "*": "MUL", "/": "DIV",
                   "&": "AND", "|": "OR",  "^": "XOR"}
+        # Operadores de comparação usando SLT/SLT unsigned + adição
         CMP_OPS = {"==", "!=", "<", ">", "<=", ">="}
 
         if op in OP_MAP:
             self._emit(f"{OP_MAP[op]} R{rd}, R{rl}, R{rr}  ; {op}")
         elif op in CMP_OPS:
-            # Implementa comparação como SUB + teste de flags
-            # Gera 0 ou 1 no registrador rd
-            self._emit(f"SUB R{rd}, R{rl}, R{rr}  ; comparação {op}")
             lbl_t = self._new_label("CMP_T")
             lbl_e = self._new_label("CMP_E")
+            ft = self._FLAGS_TMP
+            # Calcula diferença em ft para comparação
+            self._emit(f"SUB R{ft}, R{rl}, R{rr}  ; diff para comparação {op}")
             match op:
                 case "==":
-                    self._emit(f"JZ {lbl_t}")
+                    self._emit(f"BEQ R{ft}, R0, {lbl_t}")
                 case "!=":
-                    self._emit(f"JNZ {lbl_t}")
+                    self._emit(f"BNE R{ft}, R0, {lbl_t}")
                 case "<":
-                    # rd negativo → rl < rr
-                    self._emit(f"JNZ {lbl_t}  ; aproximação: != 0 ≈ <")
+                    self._emit(f"SLT R{rd}, R{rl}, R{rr}  ; rd = (rl < rr)")
+                    return rd  # SLT já coloca 0 ou 1 em rd
+                case ">":
+                    self._emit(f"SLT R{rd}, R{rr}, R{rl}  ; rd = (rr < rl)")
+                    return rd
+                case "<=":
+                    self._emit(f"SLT R{rd}, R{rr}, R{rl}  ; rd = (rr < rl) i.e. NOT (rl <= rr)")
+                    self._emit(f"XORI R{rd}, R{rd}, 1    ; inverte")
+                    return rd
+                case ">=":
+                    self._emit(f"SLT R{rd}, R{rl}, R{rr}  ; rd = (rl < rr) i.e. NOT (rl >= rr)")
+                    self._emit(f"XORI R{rd}, R{rd}, 1    ; inverte")
+                    return rd
                 case _:
-                    self._emit(f"JNZ {lbl_t}")
+                    self._emit(f"BNE R{ft}, R0, {lbl_t}")
             # falso → rd = 0
-            self._emit(f"XOR R{rd}, R{rd}, R{rd}")
+            self._emit(f"MOVI R{rd}, 0")
             self._emit(f"JMP {lbl_e}")
             self._emit(f"{lbl_t}:")
-            # verdadeiro -> rd = 1
-            lit_one = self._load_literal(1, line)
-            self._emit(f"XOR R{rd}, R{rd}, R{rd}  ; rd = 0")
-            self._emit(f"ADD R{rd}, R{lit_one}, R{rd}  ; rd = 1")
+            # verdadeiro → rd = 1
+            self._emit(f"MOVI R{rd}, 1")
             self._emit(f"{lbl_e}:")
         else:
             raise CompileError(f"Operador não suportado: {op}", line)
@@ -568,70 +555,42 @@ class CodeGen:
         rd = self._alloc_temp(line)
         match op:
             case "-":
-                # 0 - r: usa rd como scratch (nao toca R0)
-                self._emit(f"XOR R{rd}, R{rd}, R{rd}  ; R{rd} = 0")
-                self._emit(f"SUB R{rd}, R{rd}, R{r}  ; R{rd} = -R{r}")
+                self._emit(f"NEG R{rd}, R{r}  ; R{rd} = -R{r}")
             case "~":
                 self._emit(f"NOT R{rd}, R{r}")
             case "!":
-                # !r: 1 se r==0, 0 se r!=0
-                ft = self._FLAGS_TMP
-                lbl_e = self._new_label("NOT_E")
-                self._emit(f"XOR R{rd}, R{rd}, R{rd}  ; rd = 0 (assume !r = falso)")
-                self._emit(f"XOR R{ft}, R{ft}, R{ft}  ; ft = 0")
-                self._emit(f"ADD R{ft}, R{r}, R{ft}   ; flags <- R{r}")
-                self._emit(f"JNZ {lbl_e}              ; r != 0 -> resultado ja eh 0")
-                lit_one = self._load_literal(1, line)
-                self._emit(f"ADD R{rd}, R{rd}, R{lit_one}  ; rd = 0+1 = 1")
-                self._emit(f"{lbl_e}:")
+                # !r: 1 se r==0, 0 se r!=0  (usando BEQ/BNE)
+                lbl_one = self._new_label("NOT_ONE")
+                lbl_end = self._new_label("NOT_END")
+                self._emit(f"BEQ R{r}, R0, {lbl_one}  ; se r==0 → resultado é 1")
+                self._emit(f"MOVI R{rd}, 0")
+                self._emit(f"JMP {lbl_end}")
+                self._emit(f"{lbl_one}:")
+                self._emit(f"MOVI R{rd}, 1")
+                self._emit(f"{lbl_end}:")
         return rd
 
     # ---- Helpers ----------------------------------------------------------
 
-    def _ensure_flags(self, r_cond: int, expr):
-        """Garante que os flags de CPU reflitam o valor do registrador r_cond.
-        Não necessário se a expressão já é uma BinOp de comparação (ALU já atualizou flags).
-        Para VarRef ou literal, emite instrução que seta flags conforme r_cond.
-        Usa R14 (_FLAGS_TMP) como registrador scratch temporário.
-        """
-        if not isinstance(expr, BinOp):
-            ft = self._FLAGS_TMP
-            self._emit(f"XOR R{ft}, R{ft}, R{ft}  ; R{ft}=0 (scratch para teste)")
-            self._emit(f"ADD R{ft}, R{r_cond}, R{ft}  ; flags refletem R{r_cond}")
-
     def _load_literal(self, value: int, line: int) -> int:
-        """Carrega literal inteiro em registrador via LOAD do pool (base em R13)."""
-        # Verifica se já alocado no pool
-        idx = None
-        for i, v in enumerate(self._data):
-            if v == value:
-                idx = i
-                break
-        if idx is None:
-            idx = len(self._data)
-            self._data.append(value)
-
-        if idx >= 15:  # offset 4-bit: max 15 entradas no pool
-            raise CompileError(f"Pool de literais cheio (max 15): literal {value}", line)
-
-        # Na primeira carga, inicializa R13 = endereço do pool (lido de mem[R_zero+1])
-        # R0 é 0 no início DO programa; usar R14 como zero temporário para bootstrap é arriscado.
-        # Soltarão: usamos XOR de R13 com si mesmo para zerar, depois carregamos via cadeia de .WORD
-        # Estratégia robusta: emitir 'LOAD R13, [R0+1]' somente quando o R0 ainda for 0 (1ª chamada)
-        if not self._pool_initialized:
-            # R0 = 0 pois nenhuma variável foi atribuída ainda neste ponto
-            self._emit(f"; Inicializa ponteiro do pool: R{self._POOL_PTR} = mem[R0+1] = 0x{self._POOL_ADDR:04X}")
-            self._emit(f"LOAD R{self._POOL_PTR}, [R0+1]  ; R{self._POOL_PTR} = 0x{self._POOL_ADDR:04X}")
-            self._pool_initialized = True
-
+        """Carrega literal inteiro em registrador usando MOVI ou MOVHI+ORI."""
         rd = self._alloc_temp(line)
-        self._emit(f"LOAD R{rd}, [R{self._POOL_PTR}+{idx}]  ; literal {value} de pool[{idx}]")
+        # Verifica se cabe em 16 bits signed
+        if -32768 <= value <= 32767:
+            self._emit(f"MOVI R{rd}, {value}  ; literal {value}")
+        else:
+            # Carrega 32 bits: upper 21 bits via MOVHI, lower 16 bits via ORI
+            upper = (value >> 11) & 0x1FFFFF
+            lower = value & 0xFFFF
+            self._emit(f"MOVHI R{rd}, 0x{upper:05X}  ; literal {value} (upper)")
+            if lower:
+                self._emit(f"ORI   R{rd}, R{rd}, 0x{lower:04X}  ; literal (lower)")
         return rd
 
     def _alloc_var(self, name: str, line: int) -> int:
         if name in self._var_reg:
             return self._var_reg[name]
-        if self._next_reg >= self._MAX_REGS:
+        if self._next_reg > self._MAX_REGS:
             raise CompileError(f"Muitas variáveis locais (máx {self._MAX_REGS})", line)
         reg = self._next_reg
         self._next_reg += 1
@@ -661,7 +620,7 @@ class CodeGen:
 # ---------------------------------------------------------------------------
 
 def compile_source(source: str) -> str:
-    """Compila código C-like e retorna string assembly EduRISC-16."""
+    """Compila código C-like e retorna string assembly EduRISC-32v2."""
     cg = CodeGen()
     return cg.compile(source)
 

@@ -1,16 +1,12 @@
 // ============================================================================
-// pipeline_if.v  —  Estágio IF: Instruction Fetch — EduRISC-32
+// pipeline_if.v  —  Registrador de Pipeline IF/ID
 //
-// Responsabilidades:
-//  • Apresentar o endereço PC à memória de instrução
-//  • Registrar o par (PC, instrução) no registrador de pipeline IF/ID
+// Captura saídas do estágio IF (PC, instrução) e as propaga para ID.
+// Suporta:
+//  stall  — congela o conteúdo (hazard de load-use)
+//  flush  — injeta NOP (bolha por desvio tomado)
 //
-// Controle:
-//  stall  — congela o registrador IF/ID (mantém valores atuais)
-//  flush  — injeta um NOP (0x00000000) no registrador IF/ID
-//
-// O módulo não instancia a memória de instrução — recebe a instrução já
-// lida combinacionalmente por cpu_top (imem é array externo).
+// Previsão de desvio: preditor estático "não tomado" (branch not taken).
 // ============================================================================
 `timescale 1ns/1ps
 `include "isa_pkg.vh"
@@ -18,33 +14,30 @@
 module pipeline_if (
     input  wire        clk,
     input  wire        rst,
-
-    // Controle de fluxo
     input  wire        stall,
     input  wire        flush,
 
-    // Entradas funcionais
-    input  wire [27:0] pc_in,          // PC atual (saída do program_counter)
-    input  wire [31:0] instr_in,       // instrução lida da imem
+    // Entradas do estágio IF
+    input  wire [25:0] if_pc,
+    input  wire [31:0] if_instr,
 
-    // Saídas do registrador IF/ID
-    output reg  [27:0] ifid_pc,
-    output reg  [31:0] ifid_instr
+    // Saídas para estágio ID
+    output reg  [25:0] id_pc,
+    output reg  [31:0] id_instr
 );
 
+    // NOP codificado: opcode = OP_NOP (6'h31), todos os outros bits = 0
+    localparam [31:0] NOP_WORD = {`OP_NOP, 26'b0};
+
     always @(posedge clk) begin
-        if (rst) begin
-            ifid_pc    <= 28'b0;
-            ifid_instr <= 32'b0;
-        end else if (flush) begin
-            // Flush: injeta NOP
-            ifid_pc    <= 28'b0;
-            ifid_instr <= 32'b0;
+        if (rst || flush) begin
+            id_pc    <= 26'b0;
+            id_instr <= NOP_WORD;
         end else if (!stall) begin
-            ifid_pc    <= pc_in;
-            ifid_instr <= instr_in;
+            id_pc    <= if_pc;
+            id_instr <= if_instr;
         end
-        // stall && !flush: nenhuma ação — mantém valores
+        // stall: manter valores atuais (sem modificação)
     end
 
 endmodule

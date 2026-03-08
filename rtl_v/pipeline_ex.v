@@ -1,12 +1,5 @@
 // ============================================================================
-// pipeline_ex.v  —  Registrador de Pipeline EX/MEM — EduRISC-32
-//
-// Captura os resultados do estágio EX (execução ALU) e os propaga para
-// o estágio MEM.
-//
-// O estágio EX em si (muxes de forwarding, ALU, cálculo de branch) é
-// implementado diretamente em cpu_top; este módulo apenas registra as
-// saídas.
+// pipeline_ex.v  —  Registrador de Pipeline EX/MEM
 // ============================================================================
 `timescale 1ns/1ps
 `include "isa_pkg.vh"
@@ -15,57 +8,76 @@ module pipeline_ex (
     input  wire        clk,
     input  wire        rst,
 
-    // -- Entradas do resultado EX --
-    input  wire [3:0]  rd_in,
-    input  wire [31:0] alu_result_in,
-    input  wire [31:0] rs2_data_in,    // dado a escrever em STORE
-    input  wire [27:0] branch_target_in,
-    input  wire        branch_taken_in,
+    // Entradas do estágio EX
+    input  wire [4:0]  ex_rd,
+    input  wire [31:0] ex_alu_result,
+    input  wire [31:0] ex_rs2_data,    // dado a armazenar em stores
+    input  wire [25:0] ex_branch_target,
+    input  wire        ex_branch_taken,
+    input  wire [5:0]  ex_op,
 
-    // Sinais de controle propagados de ID/EX
-    input  wire        reg_write_in,
-    input  wire        mem_read_in,
-    input  wire        mem_write_in,
-    input  wire        mem_to_reg_in,
-    input  wire        halt_in,
+    // Controles WB
+    input  wire        ex_reg_write,
+    input  wire        ex_mem_read,
+    input  wire        ex_mem_write,
+    input  wire        ex_mem_to_reg,
+    input  wire [1:0]  ex_mem_size,
+    input  wire        ex_mem_signed,
+    input  wire        ex_halt,
+    input  wire        ex_trap_valid,
+    input  wire [4:0]  ex_trap_cause,
 
-    // -- Saídas do registrador EX/MEM --
-    output reg  [3:0]  exmem_rd,
-    output reg  [31:0] exmem_alu_result,
-    output reg  [31:0] exmem_rs2_data,
-    output reg  [27:0] exmem_branch_target,
-    output reg         exmem_branch_taken,
-
-    output reg         exmem_reg_write,
-    output reg         exmem_mem_read,
-    output reg         exmem_mem_write,
-    output reg         exmem_mem_to_reg,
-    output reg         exmem_halt
+    // Saídas para MEM
+    output reg  [4:0]  mem_rd,
+    output reg  [31:0] mem_alu_result,
+    output reg  [31:0] mem_rs2_data,
+    output reg  [25:0] mem_branch_target,
+    output reg         mem_branch_taken,
+    output reg  [5:0]  mem_op,
+    output reg         mem_reg_write,
+    output reg         mem_mem_read,
+    output reg         mem_mem_write,
+    output reg         mem_mem_to_reg,
+    output reg  [1:0]  mem_mem_size,
+    output reg         mem_mem_signed,
+    output reg         mem_halt,
+    output reg         mem_trap_valid,
+    output reg  [4:0]  mem_trap_cause
 );
 
     always @(posedge clk) begin
         if (rst) begin
-            exmem_rd            <= 4'b0;
-            exmem_alu_result    <= 32'b0;
-            exmem_rs2_data      <= 32'b0;
-            exmem_branch_target <= 28'b0;
-            exmem_branch_taken  <= 1'b0;
-            exmem_reg_write     <= 1'b0;
-            exmem_mem_read      <= 1'b0;
-            exmem_mem_write     <= 1'b0;
-            exmem_mem_to_reg    <= 1'b0;
-            exmem_halt          <= 1'b0;
+            mem_rd           <= 5'b0;
+            mem_alu_result   <= 32'b0;
+            mem_rs2_data     <= 32'b0;
+            mem_branch_target<= 26'b0;
+            mem_branch_taken <= 1'b0;
+            mem_op           <= `OP_NOP;
+            mem_reg_write    <= 1'b0;
+            mem_mem_read     <= 1'b0;
+            mem_mem_write    <= 1'b0;
+            mem_mem_to_reg   <= 1'b0;
+            mem_mem_size     <= 2'b0;
+            mem_mem_signed   <= 1'b0;
+            mem_halt         <= 1'b0;
+            mem_trap_valid   <= 1'b0;
+            mem_trap_cause   <= 5'b0;
         end else begin
-            exmem_rd            <= rd_in;
-            exmem_alu_result    <= alu_result_in;
-            exmem_rs2_data      <= rs2_data_in;
-            exmem_branch_target <= branch_target_in;
-            exmem_branch_taken  <= branch_taken_in;
-            exmem_reg_write     <= reg_write_in;
-            exmem_mem_read      <= mem_read_in;
-            exmem_mem_write     <= mem_write_in;
-            exmem_mem_to_reg    <= mem_to_reg_in;
-            exmem_halt          <= halt_in;
+            mem_rd           <= ex_rd;
+            mem_alu_result   <= ex_alu_result;
+            mem_rs2_data     <= ex_rs2_data;
+            mem_branch_target<= ex_branch_target;
+            mem_branch_taken <= ex_branch_taken;
+            mem_op           <= ex_op;
+            mem_reg_write    <= ex_reg_write;
+            mem_mem_read     <= ex_mem_read;
+            mem_mem_write    <= ex_mem_write;
+            mem_mem_to_reg   <= ex_mem_to_reg;
+            mem_mem_size     <= ex_mem_size;
+            mem_mem_signed   <= ex_mem_signed;
+            mem_halt         <= ex_halt;
+            mem_trap_valid   <= ex_trap_valid;
+            mem_trap_cause   <= ex_trap_cause;
         end
     end
 

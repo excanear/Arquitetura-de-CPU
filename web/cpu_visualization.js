@@ -1,584 +1,770 @@
 /**
- * cpu_visualization.js
- * Lógica de simulação e visualização do EduRISC-16
+ * cpu_visualization.js — EduRISC-32v2 Pipeline Visualizer
  *
- * Arquitetura:
- *   - EduRISC16Sim: simulador completo em JavaScript (espelho do cpu_simulator.py)
- *   - UI: atualiza DOM a cada ciclo, animando o pipeline
+ * Contém:
+ *   - ISA EduRISC-32v2 (57 instruções, 6 formatos)
+ *   - Assembler JavaScript inline
+ *   - Simulador de pipeline 5 estágios com forwarding e hazards
+ *   - Cache L1 modelo (I$/D$, direct-mapped)
+ *   - MMU/TLB modelo (32 entradas, fully associative)
+ *   - Contadores de desempenho
+ *   - Atualização do DOM em tempo real
  */
 
 "use strict";
 
 // ============================================================
-// ISA EduRISC-16 — espelho do instruction_set.py em JS
+// ISA EduRISC-32v2
 // ============================================================
 
 const OP = {
-  ADD:   0x0, SUB:  0x1, MUL: 0x2, DIV: 0x3,
-  AND:   0x4, OR:   0x5, XOR: 0x6, NOT: 0x7,
-  LOAD:  0x8, STORE:0x9, JMP: 0xA, JZ:  0xB,
-  JNZ:   0xC, CALL: 0xD, RET: 0xE, HLT: 0xF,
+  ADD:0x00, ADDI:0x01, SUB:0x02, MUL:0x03, MULH:0x04, DIV:0x05, DIVU:0x06, REM:0x07,
+  AND:0x08, ANDI:0x09, OR:0x0A,  ORI:0x0B,  XOR:0x0C, XORI:0x0D, NOT:0x0E, NEG:0x0F,
+  SHL:0x10, SHR:0x11, SHRA:0x12, SHLI:0x13, SHRI:0x14, SHRAI:0x15,
+  MOV:0x16, MOVI:0x17, MOVHI:0x18, SLT:0x19, SLTU:0x1A, SLTI:0x1B,
+  LW:0x1C, LH:0x1D, LHU:0x1E, LB:0x1F, LBU:0x20,
+  SW:0x21, SH:0x22, SB:0x23,
+  BEQ:0x24, BNE:0x25, BLT:0x26, BGE:0x27, BLTU:0x28, BGEU:0x29,
+  JMP:0x2A, JMPR:0x2B, CALL:0x2C, CALLR:0x2D, RET:0x2E, PUSH:0x2F, POP:0x30,
+  NOP:0x31, HLT:0x32, SYSCALL:0x33, ERET:0x34, MFC:0x35, MTC:0x36, FENCE:0x37, BREAK:0x38,
 };
 
-// Nome do opcode por número
-const OP_NAME = Object.fromEntries(Object.entries(OP).map(([k,v])=>[v,k]));
+const OP_NAME = {};
+for (const [k,v] of Object.entries(OP)) OP_NAME[v] = k;
 
-const INST_TYPE = {
-  R: "R",  // reg-reg     [15:12=op][11:8=rd][7:4=rs1][3:0=rs2]
-  M: "M",  // memória     [15:12=op][11:8=rd][7:4=base][3:0=offset4]
-  J: "J",  // jump        [15:12=op][11:0=addr12]
+// Formato de cada instrução
+const FMT = {
+  R:  new Set([OP.ADD,OP.SUB,OP.MUL,OP.MULH,OP.DIV,OP.DIVU,OP.REM,
+               OP.AND,OP.OR,OP.XOR,OP.NOT,OP.NEG,OP.SHL,OP.SHR,OP.SHRA,
+               OP.MOV,OP.SLT,OP.SLTU]),
+  I:  new Set([OP.ADDI,OP.ANDI,OP.ORI,OP.XORI,OP.SHLI,OP.SHRI,OP.SHRAI,
+               OP.MOVI,OP.SLTI,OP.LW,OP.LH,OP.LHU,OP.LB,OP.LBU,
+               OP.MFC,OP.MTC]),
+  S:  new Set([OP.SW,OP.SH,OP.SB]),
+  B:  new Set([OP.BEQ,OP.BNE,OP.BLT,OP.BGE,OP.BLTU,OP.BGEU]),
+  J:  new Set([OP.JMP,OP.CALL,OP.RET,OP.NOP,OP.HLT,OP.SYSCALL,OP.ERET,OP.FENCE,OP.BREAK,OP.PUSH,OP.POP]),
+  U:  new Set([OP.MOVHI]),
 };
 
-function instType(op) {
-  if ([OP.LOAD, OP.STORE].includes(op))          return INST_TYPE.M;
-  if ([OP.JMP, OP.JZ, OP.JNZ, OP.CALL].includes(op)) return INST_TYPE.J;
-  return INST_TYPE.R;
+function instrFmt(op) {
+  for (const [f, s] of Object.entries(FMT)) if (s.has(op)) return f;
+  return "J";
 }
 
-function decode(word) {
-  word &= 0xFFFF;
-  const op = (word >> 12) & 0xF;
-  const t  = instType(op);
-  if (t === INST_TYPE.J) {
-    return { op, type: t, addr: word & 0x0FFF };
-  }
-  if (t === INST_TYPE.M) {
-    return { op, type: t, rd: (word >> 8) & 0xF, base: (word >> 4) & 0xF, offset: word & 0xF };
-  }
-  // R-type
-  return { op, type: t, rd: (word >> 8) & 0xF, rs1: (word >> 4) & 0xF, rs2: word & 0xF };
-}
-
-function disassemble(word) {
-  if (word === 0) return "NOP";
-  const d = decode(word);
-  const mn = OP_NAME[d.op] ?? `?${d.op}`;
-  switch (d.type) {
-    case INST_TYPE.J: return `${mn} 0x${d.addr.toString(16).padStart(3,"0").toUpperCase()}`;
-    case INST_TYPE.M:
-      if (d.op === OP.LOAD)  return `${mn} R${d.rd}, [R${d.base}+${d.offset}]`;
-      return `${mn} [R${d.base}+${d.offset}], R${d.rd}`;
-    default:
-      if (d.op === OP.NOT) return `NOT R${d.rd}, R${d.rs1}`;
-      if (d.op === OP.RET) return `RET`;
-      if (d.op === OP.HLT) return `HLT`;
-      return `${mn} R${d.rd}, R${d.rs1}, R${d.rs2}`;
-  }
-}
+// Instruções de load/store/branch/jump
+const isLoad  = op => [OP.LW,OP.LH,OP.LHU,OP.LB,OP.LBU].includes(op);
+const isStore = op => [OP.SW,OP.SH,OP.SB].includes(op);
+const isBranch= op => [OP.BEQ,OP.BNE,OP.BLT,OP.BGE,OP.BLTU,OP.BGEU].includes(op);
+const isJump  = op => [OP.JMP,OP.JMPR,OP.CALL,OP.CALLR,OP.RET].includes(op);
+const isMulDiv= op => [OP.MUL,OP.MULH,OP.DIV,OP.DIVU,OP.REM].includes(op);
 
 // ============================================================
-// Assembler JS mínimo (subset para o exemplo embutido)
+// Inline Assembler (suporta MOVI, ADDI, ADD, MOV, BNE, HLT)
 // ============================================================
 
-function jsAssemble(src) {
-  /** Retorna Uint16Array com o programa, ou lança erro. */
-  const mem = new Uint16Array(0x10000).fill(0);
+function assemble(src) {
+  /** Retorna { words: [int, ...], symbols: {label: addr} } ou lança Error */
+  const lines = src.split('\n');
   const symbols = {};
-  const fixups  = [];
-  let   orgAddr = 0;
-  let   pc      = 0;
-  const lines   = src.split("\n");
+  const intermediate = [];   // { op, args, addr }
+  let addr = 0;
 
-  // Dois passos: 1) coletar labels; 2) gerar código
-  for (let pass = 1; pass <= 2; pass++) {
-    orgAddr = 0; pc = 0;
-    for (let li = 0; li < lines.length; li++) {
-      let line = lines[li].replace(/;.*/, "").trim();
-      if (!line) continue;
+  // Passo 1: coletar símbolos e criar lista intermediária
+  for (let rawLine of lines) {
+    const line = rawLine.replace(/;.*$/, '').trim();
+    if (!line) continue;
 
-      // Label
-      const lblM = line.match(/^([A-Za-z_]\w*)\s*:/);
-      if (lblM) {
-        if (pass === 1) symbols[lblM[1].toUpperCase()] = orgAddr + pc;
-        line = line.slice(lblM[0].length).trim();
-        if (!line) continue;
-      }
-
-      // Diretiva .ORG
-      const orgM = line.match(/^\.ORG\s+(0[xX][0-9A-Fa-f]+|\d+)/i);
-      if (orgM) { orgAddr = Number(orgM[1]); pc = 0; continue; }
-
-      // Diretiva .WORD
-      const wordM = line.match(/^\.WORD\s+(0[xX][0-9A-Fa-f]+|-?\d+)/i);
-      if (wordM) {
-        if (pass === 2) mem[orgAddr + pc] = Number(wordM[1]) & 0xFFFF;
-        pc++; continue;
-      }
-
-      if (pass === 1) { pc++; continue; }  // pass 1: só conta endereço
-
-      // Instruções
-      const toks = line.split(/[\s,]+/).filter(Boolean);
-      const mn   = toks[0].toUpperCase();
-
-      const parseReg = (s) => { const m = s?.match(/^[Rr](\d+)$/); if (!m) return null; return +m[1]; };
-      const parseImm = (s) => {
-        if (!s) return null;
-        // label?
-        const key = s.toUpperCase();
-        if (key in symbols) return symbols[key];
-        return Number(s) | 0;
-      };
-      const memArg = (s) => {
-        // [RN+offset]
-        const m = s?.match(/^\[R(\d+)\+(\d+)\]$/i);
-        return m ? { base: +m[1], offset: +m[2] } : null;
-      };
-
-      let word = 0;
-      const opcode = OP[mn];
-      if (opcode === undefined) throw new Error(`L${li+1}: mnemônico desconhecido '${mn}'`);
-      const t = instType(opcode);
-
-      if (t === INST_TYPE.J) {
-        let addr = parseImm(toks[1]);
-        if (addr === null) throw new Error(`L${li+1}: endereço inválido`);
-        word = (opcode << 12) | (addr & 0x0FFF);
-      } else if (t === INST_TYPE.M) {
-        const rd   = parseReg(toks[1]);
-        const mobj = memArg(toks[2]);
-        if (rd === null || !mobj) throw new Error(`L${li+1}: sintaxe inválida LOAD/STORE`);
-        word = (opcode << 12) | (rd << 8) | (mobj.base << 4) | (mobj.offset & 0xF);
-      } else {
-        // R-type
-        if (mn === "RET") { word = (opcode << 12); }
-        else if (mn === "HLT") { word = (opcode << 12); }
-        else if (mn === "NOT") {
-          const rd = parseReg(toks[1]);
-          const rs = parseReg(toks[2]);
-          word = (opcode << 12) | (rd << 8) | (rs << 4);
-        } else {
-          const rd  = parseReg(toks[1]);
-          const rs1 = parseReg(toks[2]);
-          const rs2 = parseReg(toks[3]);
-          if (rd === null || rs1 === null || rs2 === null)
-            throw new Error(`L${li+1}: registrador inválido — esperado Rd, Rs1, Rs2`);
-          word = (opcode << 12) | (rd << 8) | (rs1 << 4) | (rs2 & 0xF);
-        }
-      }
-      mem[orgAddr + pc] = word & 0xFFFF;
-      pc++;
+    // Label?
+    let rest = line;
+    const labelMatch = rest.match(/^(\w+)\s*:/);
+    if (labelMatch) {
+      symbols[labelMatch[1]] = addr;
+      rest = rest.slice(labelMatch[0].length).trim();
+      if (!rest) continue;
     }
+
+    // Diretiva .org / .word
+    if (rest.startsWith('.')) {
+      const [dir, ...dargs] = rest.split(/\s+/);
+      if (dir.toLowerCase() === '.org') {
+        addr = parseInt(dargs[0], 0);
+      } else if (dir.toLowerCase() === '.word') {
+        intermediate.push({ addr, op: '__DATA__', val: parseInt(dargs[0], 0) });
+        addr++;
+      }
+      continue;
+    }
+
+    const parts = rest.split(/[\s,]+/).filter(Boolean);
+    if (!parts.length) continue;
+
+    const mnemonic = parts[0].toUpperCase();
+    intermediate.push({ addr, mnemonic, args: parts.slice(1) });
+    addr++;
   }
-  return mem;
+
+  // Passo 2: gerar palavras
+  const words = new Array(addr).fill(0);
+
+  function parseReg(s) {
+    if (!s) throw new Error(`Registrador ausente`);
+    const m = s.toUpperCase().match(/^R(\d+)$/);
+    if (!m) throw new Error(`Registrador inválido: ${s}`);
+    const n = parseInt(m[1]);
+    if (n > 31) throw new Error(`R${n} fora do intervalo`);
+    return n;
+  }
+
+  function parseImm(s, bits) {
+    if (symbols[s] !== undefined) return symbols[s];
+    const v = parseInt(s, 0);
+    if (isNaN(v)) throw new Error(`Operando inválido: ${s}`);
+    return v & ((1 << bits) - 1);
+  }
+
+  for (const item of intermediate) {
+    if (item.op === '__DATA__') { words[item.addr] = item.val & 0xFFFFFFFF; continue; }
+    const { mnemonic, args, addr: ia } = item;
+    const opcode = OP[mnemonic];
+    if (opcode === undefined) throw new Error(`Mnemônico desconhecido: ${mnemonic}`);
+    let word = (opcode << 26) >>> 0;
+    const fmt = instrFmt(opcode);
+
+    try {
+      if (fmt === 'R') {
+        const rd  = parseReg(args[0]);
+        const rs1 = parseReg(args[1]);
+        const rs2 = parseReg(args[2] || '0');
+        word |= (rd << 21) | (rs1 << 16) | (rs2 << 11);
+      } else if (fmt === 'I') {
+        const rd  = parseReg(args[0]);
+        const rs1 = parseReg(args[1]);
+        const imm = parseImm(args[2] || '0', 16) & 0xFFFF;
+        word |= (rd << 21) | (rs1 << 16) | imm;
+      } else if (fmt === 'S') {
+        const rs2 = parseReg(args[0]);
+        const rs1 = parseReg(args[1]);
+        const off = parseImm(args[2] || '0', 16) & 0xFFFF;
+        word |= (rs2 << 21) | (rs1 << 16) | off;
+      } else if (fmt === 'B') {
+        const rs1 = parseReg(args[0]);
+        const rs2 = parseReg(args[1]);
+        let   off = parseImm(args[2] || '0', 16);
+        // Se argumento for label, calcular offset relativo
+        if (symbols[args[2]] !== undefined) off = symbols[args[2]] - ia;
+        word |= (rs1 << 21) | (rs2 << 16) | (off & 0xFFFF);
+      } else if (fmt === 'J') {
+        if (args[0]) {
+          const dest = symbols[args[0]] !== undefined ? symbols[args[0]] : parseImm(args[0], 26);
+          word |= dest & 0x3FFFFFF;
+        }
+        // PUSH/POP usam campo rs2 (bits 25:21)
+        if (opcode === OP.PUSH || opcode === OP.POP) {
+          const rn = parseReg(args[0]);
+          word = ((opcode << 26) | (rn << 21)) >>> 0;
+        }
+      } else if (fmt === 'U') {
+        const rd  = parseReg(args[0]);
+        const imm = parseImm(args[1] || '0', 21) & 0x1FFFFF;
+        word |= (rd << 21) | imm;
+      }
+    } catch(e) {
+      throw new Error(`Linha "${mnemonic} ${args.join(' ')}": ${e.message}`);
+    }
+
+    words[ia] = word >>> 0;
+  }
+
+  return { words, symbols };
 }
 
 // ============================================================
-// Simulador EduRISC-16 em JavaScript
+// Simulador de pipeline 5 estágios
 // ============================================================
 
-class EduRISC16Sim {
+class PipelineStage {
+  constructor(name) {
+    this.name   = name;
+    this.valid  = false;
+    this.op     = OP.NOP;
+    this.pc     = 0;
+    this.rd     = 0;
+    this.rs1    = 0;
+    this.rs2    = 0;
+    this.imm    = 0;
+    this.result = 0;
+    this.memData= 0;
+    this.detail = '—';
+  }
+}
+
+class Cache {
+  constructor(sets=256, ways=1, lineWords=4) {
+    this.sets     = sets;
+    this.ways     = ways;
+    this.lineWords= lineWords;
+    this.tags     = new Int32Array(sets).fill(-1);
+    this.valid    = new Uint8Array(sets);
+    this.dirty    = new Uint8Array(sets);   // D-cache
+    this.data     = [];
+    for (let i=0;i<sets;i++) this.data.push(new Array(lineWords).fill(0));
+
+    this.accesses = 0;
+    this.misses   = 0;
+  }
+
+  access(addr, write=false, wdata=0) {
+    const idx = (addr >> 2) & (this.sets - 1);
+    const tag = (addr >> (2 + Math.log2(this.sets)));
+    this.accesses++;
+    if (this.valid[idx] && this.tags[idx] === tag) {
+      if (write) { this.data[idx][0] = wdata; this.dirty[idx] = 1; }
+      return { hit: true, data: this.data[idx][0] };
+    }
+    // Miss → fill (simplificado: sem latência na simulação)
+    this.misses++;
+    this.valid[idx] = 1;
+    this.tags[idx]  = tag;
+    this.dirty[idx] = write ? 1 : 0;
+    if (write) this.data[idx][0] = wdata;
+    return { hit: false, data: 0 };
+  }
+
+  get missRate() {
+    return this.accesses ? (this.misses / this.accesses * 100).toFixed(1) + '%' : '—';
+  }
+}
+
+class TLB {
+  constructor(entries=32) {
+    this.entries = entries;
+    this.vpn   = new Int32Array(entries).fill(-1);
+    this.pfn   = new Int32Array(entries);
+    this.flags = new Uint8Array(entries);  // V/R/W/X/U
+    this.fifo  = 0;
+    this.hits   = 0;
+    this.misses = 0;
+    this.faults = 0;
+  }
+
+  lookup(vpn) {
+    for (let i=0;i<this.entries;i++) {
+      if ((this.flags[i]&1) && this.vpn[i]===vpn) { this.hits++; return i; }
+    }
+    this.misses++;
+    return -1;
+  }
+
+  install(vpn, pfn, flags) {
+    const idx = this.fifo;
+    this.vpn[idx]   = vpn;
+    this.pfn[idx]   = pfn;
+    this.flags[idx] = flags | 1;  // V=1
+    this.fifo       = (this.fifo + 1) % this.entries;
+  }
+
+  flush() {
+    this.flags.fill(0);
+    this.vpn.fill(-1);
+    this.fifo = 0;
+  }
+}
+
+class EduRISC32Sim {
   constructor() {
-    this.mem   = new Uint16Array(0x10000);
-    this.regs  = new Int16Array(16);
-    this.pc    = 0;
-    this.zero  = false;
-    this.carry = false;
-    this.neg   = false;
-    this.ovf   = false;
-    this.halted = false;
-    this.cycles = 0;
-    this.instrsRetired = 0;
+    this.regs   = new Int32Array(32);
+    this.csrs   = new Int32Array(32);
+    this.mem    = new Int32Array(1 << 20);  // 1M words = 4MB
+    this.pc     = 0;
+    this.cycle  = 0;
+    this.instret= 0;
     this.stalls  = 0;
-    this.flushes = 0;
-
-    // Pipeline registers (word de instrução + PC)
-    this.pip = { IF: 0, ID: 0, EX: 0, MEM: 0, WB: 0 };
-    this.pipPC = { IF: 0, ID: 0, EX: 0, MEM: 0, WB: 0 };
-
-    // Registradores de pipeline para exibição
-    this.ifid  = { valid: false, pc: 0, instr: 0 };
-    this.idex  = { valid: false, pc: 0, instr: 0, rs1: 0, rs2: 0, rd: 0, rs1v: 0, rs2v: 0 };
-    this.exmem = { valid: false, pc: 0, instr: 0, alu: 0, rs2v: 0, rd: 0 };
-    this.memwb = { valid: false, pc: 0, instr: 0, result: 0, rd: 0 };
-
-    this.eventLog = [];
-  }
-
-  loadProgram(mem) {
-    this.mem = new Uint16Array(mem);
-    this.reset(false);
-  }
-
-  reset(clearMem = false) {
-    if (clearMem) this.mem.fill(0);
-    this.regs.fill(0);
-    this.pc      = 0;
-    this.zero    = false; this.carry = false;
-    this.neg     = false; this.ovf   = false;
+    this.brmiss  = 0;
     this.halted  = false;
-    this.cycles  = 0;
-    this.instrsRetired = 0;
-    this.stalls  = 0; this.flushes = 0;
-    this.pip     = { IF: 0, ID: 0, EX: 0, MEM: 0, WB: 0 };
-    this.pipPC   = { IF: 0, ID: 0, EX: 0, MEM: 0, WB: 0 };
-    this.ifid    = { valid: false, pc: 0, instr: 0 };
-    this.idex    = { valid: false, pc: 0, instr: 0, rs1: 0, rs2: 0, rd: 0, rs1v: 0, rs2v: 0 };
-    this.exmem   = { valid: false, pc: 0, instr: 0, alu: 0, rs2v: 0, rd: 0 };
-    this.memwb   = { valid: false, pc: 0, instr: 0, result: 0, rd: 0 };
-    this.eventLog = [];
+    this.log     = [];
+
+    this.icache = new Cache();
+    this.dcache = new Cache();
+    this.tlb    = new TLB();
+
+    // Estágios do pipeline (registradores inter-estágio)
+    this.if_stage  = new PipelineStage("IF");
+    this.id_stage  = new PipelineStage("ID");
+    this.ex_stage  = new PipelineStage("EX");
+    this.mem_stage = new PipelineStage("MEM");
+    this.wb_stage  = new PipelineStage("WB");
+
+    // Flags de hazard
+    this.stall    = false;
+    this.flush    = false;
+    this.fwd_ex   = false;
+    this.fwd_mem  = false;
   }
 
-  get ipc() {
-    return this.cycles > 0 ? (this.instrsRetired / this.cycles).toFixed(2) : "0.00";
+  loadProgram(words) {
+    for (let i=0;i<words.length;i++) this.mem[i] = words[i];
   }
 
+  reset() {
+    this.regs.fill(0);
+    this.csrs.fill(0);
+    this.pc     = 0;
+    this.cycle  = 0;
+    this.instret= 0;
+    this.stalls  = 0;
+    this.brmiss  = 0;
+    this.halted  = false;
+    this.log     = [];
+    this.icache = new Cache();
+    this.dcache = new Cache();
+    this.tlb    = new TLB();
+    this.if_stage  = new PipelineStage("IF");
+    this.id_stage  = new PipelineStage("ID");
+    this.ex_stage  = new PipelineStage("EX");
+    this.mem_stage = new PipelineStage("MEM");
+    this.wb_stage  = new PipelineStage("WB");
+    this.stall = false; this.flush = false;
+    this.fwd_ex = false; this.fwd_mem = false;
+  }
+
+  /** Avança 1 ciclo de clock */
   step() {
     if (this.halted) return;
-    this.cycles++;
+    this.cycle++;
+    this.stall = false; this.flush = false;
+    this.fwd_ex = false; this.fwd_mem = false;
 
-    // Clone dos registradores de pipeline (anterior)
-    const prev_ifid  = {...this.ifid};
-    const prev_idex  = {...this.idex};
-    const prev_exmem = {...this.exmem};
-    const prev_memwb = {...this.memwb};
+    // === WB ===
+    const wb = this.wb_stage;
+    if (wb.valid && wb.rd !== 0 && wb.rd !== undefined) {
+      const wdata = isLoad(wb.op) ? wb.memData : wb.result;
+      this.regs[wb.rd] = wdata;
+      if (wb.op === OP.HLT) this.halted = true;
+    }
 
-    // ---- WB ----
-    if (prev_memwb.valid) {
-      const d = decode(prev_memwb.instr);
-      if (d.op !== OP.STORE && d.op !== OP.JMP && d.op !== OP.JZ &&
-          d.op !== OP.JNZ     && d.op !== OP.HLT && d.op !== OP.RET) {
-        if (d.rd !== undefined) {
-          this.regs[d.rd] = prev_memwb.result & 0xFFFF;
-          this._log(`WB: R${d.rd} ← 0x${(prev_memwb.result & 0xFFFF).toString(16).toUpperCase().padStart(4,"0")}`);
+    // === MEM ===
+    const ms = this.mem_stage;
+    this.wb_stage = new PipelineStage("WB");
+    Object.assign(this.wb_stage, ms);
+    if (ms.valid && isLoad(ms.op)) {
+      const { data } = this.dcache.access(ms.result & 0xFFFFF);
+      this.wb_stage.memData = data;
+      this.instret++;
+    } else if (ms.valid && isStore(ms.op)) {
+      this.dcache.access(ms.result & 0xFFFFF, true, this.regs[ms.rs2]);
+      this.mem[ms.result & 0xFFFFF] = this.regs[ms.rs2];
+      this.instret++;
+    } else if (ms.valid) {
+      this.instret++;
+    }
+
+    // === EX ===
+    const ex = this.ex_stage;
+    this.mem_stage = new PipelineStage("MEM");
+    Object.assign(this.mem_stage, ex);
+
+    if (ex.valid) {
+      // Forwarding
+      let a = this.regs[ex.rs1] || 0;
+      let b = this.regs[ex.rs2] || 0;
+
+      if (ms.valid && ms.rd && ms.rd === ex.rs1) { a = ms.result; this.fwd_ex = true; }
+      if (ms.valid && ms.rd && ms.rd === ex.rs2) { b = ms.result; this.fwd_ex = true; }
+      if (wb.valid && wb.rd && wb.rd === ex.rs1 && !this.fwd_ex) { a = this.regs[ex.rs1]; this.fwd_mem = true; }
+
+      // Selecionar operando B (imediato vs.reg)
+      const bsrc = FMT.I.has(ex.op) || FMT.S.has(ex.op) || FMT.B.has(ex.op) ? ex.imm : b;
+
+      const sa  = a | 0;  const sb = bsrc | 0;
+      const ua  = a >>> 0; const ub = bsrc >>> 0;
+
+      switch(ex.op) {
+        case OP.ADD:  case OP.ADDI: this.mem_stage.result = (sa + sb) | 0; break;
+        case OP.SUB:                this.mem_stage.result = (sa - sb) | 0; break;
+        case OP.MUL:                this.mem_stage.result = Math.imul(sa, sb); break;
+        case OP.AND:  case OP.ANDI: this.mem_stage.result = sa & sb; break;
+        case OP.OR:   case OP.ORI:  this.mem_stage.result = sa | sb; break;
+        case OP.XOR:  case OP.XORI: this.mem_stage.result = sa ^ sb; break;
+        case OP.NOT:                this.mem_stage.result = ~sa; break;
+        case OP.NEG:                this.mem_stage.result = -sa; break;
+        case OP.SHL:  case OP.SHLI: this.mem_stage.result = sa << (sb & 31); break;
+        case OP.SHR:  case OP.SHRI: this.mem_stage.result = ua >>> (ub & 31); break;
+        case OP.SHRA: case OP.SHRAI:this.mem_stage.result = sa >> (sb & 31); break;
+        case OP.MOV:                this.mem_stage.result = sa; break;
+        case OP.MOVI:               this.mem_stage.result = ex.imm; break;
+        case OP.MOVHI:              this.mem_stage.result = (ex.imm & 0x1FFFFF) << 11; break;
+        case OP.SLT:  case OP.SLTI: this.mem_stage.result = sa < sb ? 1 : 0; break;
+        case OP.SLTU:               this.mem_stage.result = ua < ub ? 1 : 0; break;
+        case OP.LW:  case OP.LH: case OP.LHU: case OP.LB: case OP.LBU:
+        case OP.SW:  case OP.SH:  case OP.SB:
+          this.mem_stage.result = (sa + sb) | 0;  // addr
+          break;
+        // Branches: calcular taken
+        case OP.BEQ:  case OP.BNE: case OP.BLT:
+        case OP.BGE:  case OP.BLTU: case OP.BGEU: {
+          let taken = false;
+          if (ex.op===OP.BEQ)  taken = a===b;
+          if (ex.op===OP.BNE)  taken = a!==b;
+          if (ex.op===OP.BLT)  taken = sa<(b|0);
+          if (ex.op===OP.BGE)  taken = sa>=(b|0);
+          if (ex.op===OP.BLTU) taken = ua<ub;
+          if (ex.op===OP.BGEU) taken = ua>=ub;
+          if (taken) {
+            const target = (ex.pc + ex.imm) & 0x3FFFFFF;
+            this.pc = target;
+            this.flush = true; this.brmiss++;
+          }
+          this.mem_stage.result = taken ? 1 : 0;
+          break;
         }
-      }
-      if (d.op === OP.HLT) { this.halted = true; }
-      this.instrsRetired++;
-    }
-
-    // ---- MEM ----
-    this.memwb = { valid: false, pc: 0, instr: 0, result: 0, rd: 0 };
-    if (prev_exmem.valid) {
-      const d = decode(prev_exmem.instr);
-      let result = prev_exmem.alu;
-      if (d.op === OP.LOAD) {
-        result = this.mem[prev_exmem.alu & 0xFFFF] ?? 0;
-        this._log(`MEM: LOAD mem[0x${(prev_exmem.alu & 0xFFFF).toString(16).toUpperCase().padStart(4,"0")}] = 0x${result.toString(16).toUpperCase().padStart(4,"0")}`);
-      } else if (d.op === OP.STORE) {
-        this.mem[prev_exmem.alu & 0xFFFF] = prev_exmem.rs2v & 0xFFFF;
-        this._log(`MEM: STORE mem[0x${(prev_exmem.alu & 0xFFFF).toString(16).toUpperCase().padStart(4,"0")}] ← 0x${(prev_exmem.rs2v & 0xFFFF).toString(16).toUpperCase().padStart(4,"0")}`);
-      }
-      this.memwb = { valid: true, pc: prev_exmem.pc, instr: prev_exmem.instr, result, rd: prev_exmem.rd };
-    }
-
-    // ---- EX ----
-    this.exmem = { valid: false, pc: 0, instr: 0, alu: 0, rs2v: 0, rd: 0 };
-    if (prev_idex.valid) {
-      const d   = decode(prev_idex.instr);
-      let   alu = 0;
-
-      // Forwarding simples: MEM/WB → EX
-      let rs1v = prev_idex.rs1v;
-      let rs2v = prev_idex.rs2v;
-      if (prev_exmem.valid && prev_exmem.rd !== 0) {
-        if (d.rs1 === prev_exmem.rd) rs1v = prev_exmem.alu;
-        if (d.rs2 === prev_exmem.rd) rs2v = prev_exmem.alu;
-      }
-      if (prev_memwb.valid && prev_memwb.rd !== 0) {
-        if (d.rs1 === prev_memwb.rd) rs1v = prev_memwb.result;
-        if (d.rs2 === prev_memwb.rd) rs2v = prev_memwb.result;
-      }
-
-      const s16 = v => (v & 0x8000) ? (v | 0xFFFF0000) : (v & 0xFFFF);
-
-      switch(d.op) {
-        case OP.ADD:  alu = (rs1v + rs2v) & 0xFFFF; break;
-        case OP.SUB:  alu = (rs1v - rs2v) & 0xFFFF; break;
-        case OP.MUL:  alu = (rs1v * rs2v) & 0xFFFF; break;
-        case OP.DIV:  alu = rs2v ? ((rs1v / rs2v) | 0) & 0xFFFF : 0xFFFF; break;
-        case OP.AND:  alu = (rs1v & rs2v) & 0xFFFF; break;
-        case OP.OR:   alu = (rs1v | rs2v) & 0xFFFF; break;
-        case OP.XOR:  alu = (rs1v ^ rs2v) & 0xFFFF; break;
-        case OP.NOT:  alu = (~rs1v) & 0xFFFF; break;
-        case OP.LOAD: alu = (this.regs[d.base] + d.offset) & 0xFFFF; break;
-        case OP.STORE:alu = (this.regs[d.base] + d.offset) & 0xFFFF; rs2v = this.regs[d.rd]; break;
-        case OP.JMP:  this.pc = d.addr; this.flushes++; this._flush(); break;
-        case OP.JZ:
-          this.zero = (this.regs[prev_idex.rs1 ?? 0] === 0);
-          if (this.zero)  { this.pc = d.addr; this.flushes++; this._flush(); }
-          break;
-        case OP.JNZ:
-          this.zero = (this.regs[prev_idex.rs1 ?? 0] === 0);
-          if (!this.zero) { this.pc = d.addr; this.flushes++; this._flush(); }
-          break;
-        case OP.CALL:
-          this.regs[15] = (prev_idex.pc + 1) & 0xFFFF;
-          this.pc = d.addr; this.flushes++; this._flush();
-          break;
+        case OP.JMP:  case OP.CALL:
+          this.pc = ex.imm & 0x3FFFFFF; this.flush = true; break;
         case OP.RET:
-          this.pc = this.regs[15];
-          this.flushes++; this._flush();
-          break;
+          this.pc = this.regs[31] & 0x3FFFFFF; this.flush = true; break;
+        case OP.MFC:
+          this.mem_stage.result = this.csrs[ex.imm & 0x1F]; break;
+        case OP.MTC:
+          this.csrs[ex.imm & 0x1F] = a; break;
         default: break;
       }
 
-      // Flags (após ops aritméticas)
-      if ([OP.ADD,OP.SUB,OP.MUL,OP.DIV,OP.AND,OP.OR,OP.XOR,OP.NOT].includes(d.op)) {
-        this.zero  = (alu === 0);
-        this.neg   = !!(alu & 0x8000);
-        this.carry = (rs1v + rs2v) > 0xFFFF;
-        this.ovf   = false; // simplificado
+      // CALL: salvar LR
+      if (ex.op === OP.CALL || ex.op === OP.CALLR) this.regs[31] = ex.pc + 1;
+
+      this.mem_stage.detail = `${OP_NAME[ex.op]||'?'} R${ex.rd}=0x${(this.mem_stage.result>>>0).toString(16)}`;
+    }
+
+    // === ID ===
+    const id = this.id_stage;
+    this.ex_stage = new PipelineStage("EX");
+
+    // Load-use hazard: bolha se instrução anterior é LW e usa o mesmo registrador
+    const load_use = ms.valid && isLoad(ms.op) && ms.rd !== 0 &&
+                     (ms.rd === id.rs1 || ms.rd === id.rs2);
+    if (load_use) { this.stall = true; this.stalls++; }
+
+    if (load_use) {
+      // Inserir bolha no EX, manter ID/IF
+      this.ex_stage.valid = false;
+      this.ex_stage.op    = OP.NOP;
+    } else {
+      Object.assign(this.ex_stage, id);
+      this.ex_stage.detail = id.valid ? `${OP_NAME[id.op]||'?'} R${id.rs1},R${id.rs2}` : '—';
+    }
+
+    // === IF ===
+    const io = this.if_stage;
+    this.id_stage = new PipelineStage("ID");
+
+    if (!load_use && !this.halted) {
+      if (io.valid && !this.flush) {
+        const word = io.word || 0;
+        const op   = (word >>> 26) & 0x3F;
+        const fmt  = instrFmt(op);
+        let rd=0, rs1=0, rs2=0, imm=0;
+        if (fmt==='R'||fmt==='I'||fmt==='U') { rd=(word>>>21)&0x1f; rs1=(word>>>16)&0x1f; }
+        if (fmt==='R') { rs2=(word>>>11)&0x1f; }
+        if (fmt==='I') { imm=((word&0xFFFF)<<16)>>16; }  // sext16
+        if (fmt==='S') { rs2=(word>>>21)&0x1f; rs1=(word>>>16)&0x1f; imm=((word&0xFFFF)<<16)>>16; }
+        if (fmt==='B') { rs1=(word>>>21)&0x1f; rs2=(word>>>16)&0x1f; imm=((word&0xFFFF)<<16)>>16; }
+        if (fmt==='J') { imm=((word&0x3FFFFFF)<<6)>>6; }  // sext26
+        if (fmt==='U') { imm=word&0x1FFFFF; }
+        this.id_stage = { ...new PipelineStage("ID"), valid:true, op, rd, rs1, rs2, imm,
+          pc:io.pc, detail:`${OP_NAME[op]||'?'} [${io.pc.toString(16)}]` };
       }
-
-      this.exmem = { valid: true, pc: prev_idex.pc, instr: prev_idex.instr, alu, rs2v: rs2v & 0xFFFF, rd: d.rd ?? 0 };
-      this._log(`EX: ${disassemble(prev_idex.instr)} → ALU=0x${alu.toString(16).toUpperCase().padStart(4,"0")}`);
     }
 
-    // ---- ID ----
-    this.idex = { valid: false, pc: 0, instr: 0, rs1: 0, rs2: 0, rd: 0, rs1v: 0, rs2v: 0 };
-    if (prev_ifid.valid) {
-      const d = decode(prev_ifid.instr);
-      const rs1v = (d.rs1 !== undefined) ? (this.regs[d.rs1] & 0xFFFF) : 0;
-      const rs2v = (d.rs2 !== undefined) ? (this.regs[d.rs2] & 0xFFFF) : 0;
-      this.idex = {
-        valid: true, pc: prev_ifid.pc, instr: prev_ifid.instr,
-        rs1: d.rs1 ?? 0, rs2: d.rs2 ?? 0, rd: d.rd ?? 0,
-        rs1v, rs2v,
-      };
-      this._log(`ID: ${disassemble(prev_ifid.instr)}`);
+    // Fetch nova instrução
+    if (!this.stall && !this.halted) {
+      const fetchPc = this.flush ? this.pc : this.pc;
+      const { hit } = this.icache.access(fetchPc);
+      const word = this.mem[fetchPc & 0xFFFFF] || 0;
+      this.if_stage = { ...new PipelineStage("IF"), valid:true, pc: fetchPc,
+        word, detail:`0x${(word>>>0).toString(16).padStart(8,'0')} @${fetchPc.toString(16)}` };
+      if (!this.flush) this.pc = (this.pc + 1) & 0x3FFFFFF;
     }
 
-    // ---- IF ----
-    this.ifid = { valid: false, pc: 0, instr: 0 };
-    if (!this.halted) {
-      const instr = this.mem[this.pc] ?? 0;
-      this.ifid = { valid: true, pc: this.pc, instr };
-      this._log(`IF: fetch PC=0x${this.pc.toString(16).toUpperCase().padStart(4,"0")} → ${disassemble(instr)}`);
-      this.pc = (this.pc + 1) & 0xFFFF;
+    if (this.flush) {
+      this.if_stage.valid = false;
+      this.id_stage.valid = false;
     }
 
-    // Atualiza exibição do pipeline
-    this.pip.IF  = this.ifid.valid  ? this.ifid.instr  : 0;
-    this.pip.ID  = this.idex.valid  ? this.idex.instr  : 0;
-    this.pip.EX  = this.exmem.valid ? this.exmem.instr : 0;
-    this.pip.MEM = this.memwb.valid ? this.memwb.instr : 0;
-    this.pip.WB  = prev_memwb.valid ? prev_memwb.instr : 0;
-  }
+    // Update performance counters
+    this.csrs[7] = this.cycle & 0x7FFFFFFF;
+    this.csrs[9] = this.instret;
+    this.csrs[10]= this.stalls;
+    this.csrs[11]= this.dcache.misses;
+    this.csrs[12]= this.icache.misses;
+    this.csrs[13]= this.brmiss;
 
-  _flush() {
-    this.ifid = { valid: false, pc: 0, instr: 0 };
-    this.idex = { valid: false, pc: 0, instr: 0, rs1: 0, rs2: 0, rd: 0, rs1v: 0, rs2v: 0 };
-  }
+    this.regs[0] = 0;  // R0 sempre zero
 
-  _log(msg) {
-    this.eventLog.push(`[C${this.cycles}] ${msg}`);
-    if (this.eventLog.length > 200) this.eventLog.shift();
-  }
-
-  snapshot() {
-    return {
-      pc:      this.pc,
-      regs:    Array.from(this.regs),
-      flags:   { zero: this.zero, carry: this.carry, neg: this.neg, ovf: this.ovf },
-      pip:     {...this.pip},
-      ifid:    {...this.ifid},
-      idex:    {...this.idex},
-      exmem:   {...this.exmem},
-      memwb:   {...this.memwb},
-      cycles:  this.cycles,
-      instrs:  this.instrsRetired,
-      stalls:  this.stalls,
-      flushes: this.flushes,
-      halted:  this.halted,
-    };
+    this.log.push(`[${this.cycle}] PC=0x${this.ex_stage.pc?.toString(16)||'?'} ${OP_NAME[this.ex_stage.op]||'?'}`);
+    if (this.log.length > 200) this.log.shift();
   }
 }
 
 // ============================================================
-// Controlador de UI
+// UI
 // ============================================================
 
-const sim = new EduRISC16Sim();
-let   memViewBase = 0;
+const sim = new EduRISC32Sim();
+let programLoaded = false;
+let runTimer = null;
 
-// ---- Inicializa banco de registradores ----
-function buildRegGrid() {
-  const grid = document.getElementById("regfile-grid");
-  grid.innerHTML = "";
-  for (let i = 0; i < 16; i++) {
-    const cell = document.createElement("div");
-    cell.className = "reg-cell";
-    cell.id        = `reg-${i}`;
-    const aliases  = { 15: "LR" };
-    cell.innerHTML = `<span class="reg-name">R${i}${aliases[i] ? "<br/><small>"+aliases[i]+"</small>" : ""}</span><span class="reg-val" id="regval-${i}">0x0000</span>`;
+// Nomes canônicos dos CSRs
+const CSR_NAMES = [
+  'STATUS','IVT','EPC','CAUSE','ESCRATCH','PTBR','TLBCTL',
+  'CYCLE','CYCLEH','INSTRET','ICOUNT','DCMISS','ICMISS','BRMISS',
+];
+
+// ---------------------------------------------------------------
+// Inicialização dos painéis
+// ---------------------------------------------------------------
+function initRegGrid() {
+  const grid = document.getElementById('reg-grid');
+  grid.innerHTML = '';
+  for (let i=0;i<32;i++) {
+    const cell = document.createElement('div');
+    cell.className = 'reg-cell' + (i===0?' r0':(i===30?' sp':(i===31?' lr':'')));
+    cell.id = `reg-${i}`;
+    cell.innerHTML = `<div class="reg-name">R${i}${i===0?'/zero':i===30?'/SP':i===31?'/LR':''}</div>
+                      <div class="reg-val" id="rval-${i}">0x00000000</div>`;
     grid.appendChild(cell);
   }
 }
 
-// ---- Atualiza toda a UI com o estado atual do simulador ----
-function updateUI(snap) {
-  // Ciclo / PC / status
-  document.getElementById("cycle-num").textContent  = snap.cycles;
-  document.getElementById("pc-display").textContent  = "0x" + snap.pc.toString(16).toUpperCase().padStart(4,"0");
-  const statusEl = document.getElementById("status-display");
-  if (snap.halted) {
-    statusEl.textContent = "HALTED";
-    statusEl.className   = "status-halted";
-  } else {
-    statusEl.textContent = "RUN";
-    statusEl.className   = "status-run";
+function initCSRGrid() {
+  const grid = document.getElementById('csr-grid');
+  grid.innerHTML = '';
+  for (let i=0;i<14;i++) {
+    const cell = document.createElement('div');
+    cell.className = 'csr-cell';
+    cell.innerHTML = `<div class="csr-name">[${i}] ${CSR_NAMES[i]||'CSR'+i}</div>
+                      <div class="csr-val" id="csr-${i}">0x00000000</div>`;
+    grid.appendChild(cell);
   }
-
-  // Pipeline stages
-  const STAGES = ["IF","ID","EX","MEM","WB"];
-  STAGES.forEach(s => {
-    const el = document.getElementById(`cell-${s}`);
-    const w  = snap.pip[s];
-    el.textContent   = w ? disassemble(w) : "—";
-    el.className     = "stage-instr" + (w ? " stage-active" : "");
-  });
-
-  // Registradores de pipeline (detail boxes)
-  const ifidEl = document.getElementById("preg-IFID-body");
-  ifidEl.textContent = snap.ifid.valid
-    ? `PC=0x${snap.ifid.pc.toString(16).toUpperCase().padStart(4,"0")}\n${disassemble(snap.ifid.instr)}`
-    : "NOP / vazio";
-
-  const idexEl = document.getElementById("preg-IDEX-body");
-  idexEl.textContent = snap.idex.valid
-    ? `PC=0x${snap.idex.pc.toString(16).toUpperCase().padStart(4,"0")}\n${disassemble(snap.idex.instr)}\nRS1=0x${snap.idex.rs1v.toString(16).toUpperCase().padStart(4,"0")} RS2=0x${snap.idex.rs2v.toString(16).toUpperCase().padStart(4,"0")}`
-    : "NOP / vazio";
-
-  const exmemEl = document.getElementById("preg-EXMEM-body");
-  exmemEl.textContent = snap.exmem.valid
-    ? `PC=0x${snap.exmem.pc.toString(16).toUpperCase().padStart(4,"0")}\n${disassemble(snap.exmem.instr)}\nALU=0x${snap.exmem.alu.toString(16).toUpperCase().padStart(4,"0")} RD=R${snap.exmem.rd}`
-    : "NOP / vazio";
-
-  const memwbEl = document.getElementById("preg-MEMWB-body");
-  memwbEl.textContent = snap.memwb.valid
-    ? `PC=0x${snap.memwb.pc.toString(16).toUpperCase().padStart(4,"0")}\n${disassemble(snap.memwb.instr)}\nRES=0x${snap.memwb.result.toString(16).toUpperCase().padStart(4,"0")} RD=R${snap.memwb.rd}`
-    : "NOP / vazio";
-
-  // Banco de registradores
-  snap.regs.forEach((v, i) => {
-    const el = document.getElementById(`regval-${i}`);
-    if (!el) return;
-    const hex = (v & 0xFFFF).toString(16).toUpperCase().padStart(4,"0");
-    const changed = el.textContent !== `0x${hex}`;
-    el.textContent = `0x${hex}`;
-    if (changed) {
-      el.parentElement.classList.add("reg-changed");
-      setTimeout(() => el.parentElement.classList.remove("reg-changed"), 600);
-    }
-  });
-
-  // Flags
-  document.getElementById("flag-Z").textContent = `Z=${+snap.flags.zero}`;
-  document.getElementById("flag-C").textContent = `C=${+snap.flags.carry}`;
-  document.getElementById("flag-N").textContent = `N=${+snap.flags.neg}`;
-  document.getElementById("flag-V").textContent = `V=${+snap.flags.ovf}`;
-  document.getElementById("flag-Z").className = "flag" + (snap.flags.zero  ? " flag-set" : "");
-  document.getElementById("flag-C").className = "flag" + (snap.flags.carry ? " flag-set" : "");
-  document.getElementById("flag-N").className = "flag" + (snap.flags.neg   ? " flag-set" : "");
-  document.getElementById("flag-V").className = "flag" + (snap.flags.ovf   ? " flag-set" : "");
-
-  // Estatísticas
-  document.getElementById("stat-cycles").textContent  = snap.cycles;
-  document.getElementById("stat-instrs").textContent  = snap.instrs;
-  document.getElementById("stat-stalls").textContent  = snap.stalls;
-  document.getElementById("stat-flushes").textContent = snap.flushes;
-  document.getElementById("stat-ipc").textContent     = sim.ipc;
-
-  // Log de eventos
-  updateEventLog();
-
-  // Memória
-  updateMemView(memViewBase);
 }
 
-function updateEventLog() {
-  const el = document.getElementById("event-log");
-  el.innerHTML = sim.eventLog.slice().reverse().map(l =>
-    `<div class="log-entry">${escHtml(l)}</div>`
-  ).join("");
+function initCacheTables() {
+  // Mostrar apenas as primeiras 16 linhas
+  const rows = 16;
+  ['ic-tbody','dc-tbody'].forEach(id => {
+    const tbody = document.getElementById(id);
+    tbody.innerHTML = '';
+    for (let i=0;i<rows;i++) {
+      const tr = document.createElement('tr');
+      tr.id = `${id}-row-${i}`;
+      tr.innerHTML = `<td>${i}</td><td>0</td><td>—</td><td>0x00000000</td><td>0x00000000</td>`;
+      tbody.appendChild(tr);
+    }
+  });
 }
 
-function updateMemView(base) {
-  base = Math.max(0, Math.min(0xFFF8, base & 0xFFF8));
-  memViewBase = base;
-  const tbody = document.getElementById("mem-tbody");
-  tbody.innerHTML = "";
-  for (let row = 0; row < 8; row++) {
-    const addr = base + row * 8;
-    const tr   = document.createElement("tr");
-    let html   = `<td class="mem-addr">0x${addr.toString(16).toUpperCase().padStart(4,"0")}</td>`;
-    for (let col = 0; col < 8; col++) {
-      const a   = addr + col;
-      const val = sim.mem[a] ?? 0;
-      const highlight = (a === sim.pc) ? " mem-pc" : "";
-      html += `<td class="mem-word${highlight}">0x${val.toString(16).toUpperCase().padStart(4,"0")}</td>`;
-    }
-    tr.innerHTML = html;
+function initTLBTable() {
+  const tbody = document.getElementById('tlb-tbody');
+  tbody.innerHTML = '';
+  for (let i=0;i<16;i++) {
+    const tr = document.createElement('tr');
+    tr.id = `tlb-row-${i}`;
+    tr.innerHTML = `<td>${i}</td><td>0</td><td>—</td><td>—</td><td>0</td><td>0</td><td>0</td><td>0</td>`;
     tbody.appendChild(tr);
   }
 }
 
-function escHtml(s) {
-  return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+// ---------------------------------------------------------------
+// Atualização de UI
+// ---------------------------------------------------------------
+const prevRegs = new Int32Array(32);
+
+function updateUI() {
+  // Registradores
+  for (let i=0;i<32;i++) {
+    const el = document.getElementById(`rval-${i}`);
+    const cell = document.getElementById(`reg-${i}`);
+    if (!el) continue;
+    const val = sim.regs[i] >>> 0;
+    el.textContent = '0x' + val.toString(16).padStart(8,'0');
+    if (val !== (prevRegs[i] >>> 0)) { cell.classList.add('changed'); }
+    else { cell.classList.remove('changed'); }
+    prevRegs[i] = sim.regs[i];
+  }
+
+  // CSRs
+  for (let i=0;i<14;i++) {
+    const el = document.getElementById(`csr-${i}`);
+    if (el) el.textContent = '0x'+(sim.csrs[i]>>>0).toString(16).padStart(8,'0');
+  }
+
+  // Pipeline stages
+  const stages = [
+    ['if',  sim.if_stage],
+    ['id',  sim.id_stage],
+    ['ex',  sim.ex_stage],
+    ['mem', sim.mem_stage],
+    ['wb',  sim.wb_stage],
+  ];
+  for (const [name, st] of stages) {
+    document.getElementById(`${name}-detail`).textContent = st.detail || '—';
+    const el = document.getElementById(`stage-${name}`);
+    el.classList.toggle('active', !!st.valid);
+    el.classList.toggle('stall',  name==='if' && sim.stall);
+    el.classList.toggle('flush',  name==='if' && sim.flush);
+  }
+
+  // Hazard indicators
+  document.getElementById('haz-stall'  ).classList.toggle('active', sim.stall);
+  document.getElementById('haz-flush'  ).classList.toggle('active', sim.flush);
+  document.getElementById('haz-fwd-ex' ).classList.toggle('active', sim.fwd_ex);
+  document.getElementById('haz-fwd-mem').classList.toggle('active', sim.fwd_mem);
+
+  // Cache stats
+  document.getElementById('ic-access').textContent   = sim.icache.accesses;
+  document.getElementById('ic-miss').textContent     = sim.icache.misses;
+  document.getElementById('ic-missrate').textContent = sim.icache.missRate;
+  document.getElementById('dc-access').textContent   = sim.dcache.accesses;
+  document.getElementById('dc-miss').textContent     = sim.dcache.misses;
+  document.getElementById('dc-missrate').textContent = sim.dcache.missRate;
+
+  // Cache rows
+  for (let i=0;i<16;i++) {
+    const ic = document.getElementById(`ic-tbody-row-${i}`);
+    const dc = document.getElementById(`dc-tbody-row-${i}`);
+    if (ic) {
+      const v = sim.icache.valid[i];
+      const tag = v ? ('0x'+sim.icache.tags[i].toString(16)) : '—';
+      const w0  = v ? ('0x'+(sim.icache.data[i][0]>>>0).toString(16).padStart(8,'0')) : '—';
+      const w1  = v ? ('0x'+(sim.icache.data[i][1]>>>0).toString(16).padStart(8,'0')) : '—';
+      ic.innerHTML = `<td>${i}</td><td>${v}</td><td>${tag}</td><td>${w0}</td><td>${w1}</td>`;
+    }
+    if (dc) {
+      const v = sim.dcache.valid[i]; const d = sim.dcache.dirty[i];
+      const tag = v ? ('0x'+sim.dcache.tags[i].toString(16)) : '—';
+      const w0  = v ? ('0x'+(sim.dcache.data[i][0]>>>0).toString(16).padStart(8,'0')) : '—';
+      const w1  = v ? ('0x'+(sim.dcache.data[i][1]>>>0).toString(16).padStart(8,'0')) : '—';
+      dc.innerHTML = `<td>${i}</td><td>${v}</td><td class="${d?'dirty':''}">${d}</td><td>${tag}</td><td>${w0}</td><td>${w1}</td>`;
+    }
+  }
+
+  // TLB rows
+  for (let i=0;i<16;i++) {
+    const tr = document.getElementById(`tlb-row-${i}`);
+    if (!tr) continue;
+    const v    = (sim.tlb.flags[i] & 1);
+    const vpn  = v ? ('0x'+sim.tlb.vpn[i].toString(16)) : '—';
+    const pfn  = v ? ('0x'+sim.tlb.pfn[i].toString(16)) : '—';
+    const f    = sim.tlb.flags[i];
+    tr.innerHTML=`<td>${i}</td><td>${v}</td><td>${vpn}</td><td>${pfn}</td>`+
+      `<td>${(f>>1)&1}</td><td>${(f>>2)&1}</td><td>${(f>>3)&1}</td><td>${(f>>4)&1}</td>`;
+  }
+
+  document.getElementById('tlb-hits').textContent   = sim.tlb.hits;
+  document.getElementById('tlb-misses').textContent = sim.tlb.misses;
+  document.getElementById('pf-count').textContent   = sim.tlb.faults;
+
+  // MMU vm-enable
+  const st = sim.csrs[0];
+  const vmOn = !!(st & 2);
+  const vmEl = document.getElementById('vm-enable');
+  vmEl.textContent = vmOn ? 'ON' : 'OFF';
+  vmEl.className   = vmOn ? 'vm-on' : 'vm-off';
+
+  // Counters
+  document.getElementById('p-cycles').textContent  = sim.cycle;
+  document.getElementById('p-instret').textContent = sim.instret;
+  document.getElementById('p-stalls').textContent  = sim.stalls;
+  document.getElementById('p-icmiss').textContent  = sim.icache.misses;
+  document.getElementById('p-dcmiss').textContent  = sim.dcache.misses;
+  document.getElementById('p-brmiss').textContent  = sim.brmiss;
+
+  // CPI
+  const cpi = sim.instret > 0 ? (sim.cycle / sim.instret).toFixed(2) : '—';
+  document.getElementById('cpi-display').textContent = cpi;
+
+  // PC / cycle / status
+  document.getElementById('cycle-num').textContent = sim.cycle;
+  document.getElementById('pc-display').textContent = '0x' + sim.pc.toString(16).padStart(6,'0');
+  const statusEl = document.getElementById('status-display');
+  if (sim.halted) { statusEl.textContent='HALTED'; statusEl.className='status-halted'; }
+  else if (sim.stall) { statusEl.textContent='STALL'; statusEl.className='status-stall'; }
+  else { statusEl.textContent='RUNNING'; statusEl.className='status-running'; }
+
+  // Log
+  const logEl = document.getElementById('exec-log');
+  logEl.textContent = sim.log.slice(-60).join('\n');
+  logEl.scrollTop = logEl.scrollHeight;
 }
 
-// ============================================================
-// Handlers de botões
-// ============================================================
-
-document.getElementById("btn-step").addEventListener("click", () => {
-  if (!sim.halted) {
-    sim.step();
-    updateUI(sim.snapshot());
+// ---------------------------------------------------------------
+// Event handlers
+// ---------------------------------------------------------------
+document.getElementById('btn-assemble').addEventListener('click', () => {
+  const src = document.getElementById('asm-source').value;
+  const errEl = document.getElementById('asm-error');
+  try {
+    const { words } = assemble(src);
+    sim.reset();
+    sim.loadProgram(words);
+    programLoaded = true;
+    errEl.textContent = `Montado: ${words.length} words`;
+    errEl.classList.remove('hidden');
+    errEl.style.color = 'var(--accent2)';
+    updateUI();
+  } catch(e) {
+    errEl.textContent = '❌ ' + e.message;
+    errEl.classList.remove('hidden');
+    errEl.style.color = 'var(--danger)';
+    programLoaded = false;
   }
 });
 
-let runTimer = null;
+document.getElementById('btn-step').addEventListener('click', () => {
+  if (!programLoaded) return;
+  sim.step();
+  updateUI();
+});
 
-document.getElementById("btn-run").addEventListener("click", () => {
+document.getElementById('btn-run').addEventListener('click', () => {
+  if (!programLoaded) return;
   if (runTimer) { clearInterval(runTimer); runTimer = null; return; }
   runTimer = setInterval(() => {
-    if (sim.halted) { clearInterval(runTimer); runTimer = null; return; }
-    sim.step();
-    updateUI(sim.snapshot());
-  }, 150);
+    for (let i=0;i<4;i++) { sim.step(); if (sim.halted) break; }
+    updateUI();
+    if (sim.halted) { clearInterval(runTimer); runTimer = null; }
+  }, 50);
 });
 
-document.getElementById("btn-reset").addEventListener("click", () => {
+document.getElementById('btn-reset').addEventListener('click', () => {
   if (runTimer) { clearInterval(runTimer); runTimer = null; }
-  // Preserva memória do programa mas reinicia estado
-  const savedMem = new Uint16Array(sim.mem);
   sim.reset();
-  sim.mem = savedMem;
-  updateUI(sim.snapshot());
-  document.getElementById("status-display").textContent = "IDLE";
-  document.getElementById("status-display").className   = "status-idle";
+  programLoaded = false;
+  updateUI();
+  document.getElementById('status-display').textContent = 'IDLE';
+  document.getElementById('status-display').className   = 'status-idle';
+  document.getElementById('exec-log').textContent = '';
 });
 
-document.getElementById("btn-assemble").addEventListener("click", () => {
-  const src     = document.getElementById("asm-source").value;
-  const errEl   = document.getElementById("asm-error");
-  try {
-    const mem = jsAssemble(src);
-    if (runTimer) { clearInterval(runTimer); runTimer = null; }
-    sim.loadProgram(mem);
-    errEl.textContent = "";
-    errEl.classList.add("hidden");
-    updateUI(sim.snapshot());
-  } catch(e) {
-    errEl.textContent = "Erro: " + e.message;
-    errEl.classList.remove("hidden");
-  }
+document.getElementById('btn-load').addEventListener('click', () => {
+  const example = `; Fibonacci F(10) — resultado em R3
+    MOVI  R1, 0
+    MOVI  R2, 1
+    MOVI  R4, 10
+loop:
+    ADD   R3, R1, R2
+    MOV   R1, R2
+    MOV   R2, R3
+    ADDI  R4, R4, -1
+    BNE   R4, R0, loop
+    HLT`;
+  document.getElementById('asm-source').value = example;
+  document.getElementById('btn-assemble').click();
 });
 
-document.getElementById("btn-load").addEventListener("click", () => {
-  // Carrega o exemplo padrão do textarea e monta
-  document.getElementById("btn-assemble").click();
-});
-
-document.getElementById("btn-mem-goto").addEventListener("click", () => {
-  const val = parseInt(document.getElementById("mem-addr-input").value, 16);
-  if (!isNaN(val)) updateMemView(val);
-});
-
-// ---- Inicialização ----
-buildRegGrid();
-updateUI(sim.snapshot());
-// Monta o código de exemplo ao carregar
-setTimeout(() => document.getElementById("btn-assemble").click(), 100);
+// ---------------------------------------------------------------
+// Inicializar
+// ---------------------------------------------------------------
+initRegGrid();
+initCSRGrid();
+initCacheTables();
+initTLBTable();
+updateUI();

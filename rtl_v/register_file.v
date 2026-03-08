@@ -1,54 +1,60 @@
 // ============================================================================
-// register_file.v  —  Banco de Registradores — EduRISC-32
+// register_file.v  —  Banco de 32 registradores × 32 bits
 //
-// 16 registradores de 32 bits (R0-R15).
-// R15 é o link register (LR): carregado por CALL, usado por RET.
-//
-// Leitura:  combinacional (dois leitores independentes: rs1, rs2)
-// Escrita:  síncrona na borda de subida do clock
-//
-// Atenção: diferente de RISC-V, R0 NÃO é hardwired a zero.
-//          Qualquer registrador pode ser lido e escrito.
+// • R0 hardwired = 0 (escrita para R0 é descartada)
+// • R30 = SP (Stack Pointer), R31 = LR (Link Register) por convenção
+// • Leitura: combinacional (2 portas de leitura independentes)
+// • Escrita: síncrona na subida do clock
+// • Reset síncrono: zera todos os registradores
 // ============================================================================
 `timescale 1ns/1ps
+`include "isa_pkg.vh"
 
 module register_file (
     input  wire        clk,
-    input  wire        rst,        // reset síncrono (zera todos os regs)
+    input  wire        rst,
 
-    // Porta de leitura A (rs1)
-    input  wire [3:0]  rs1,
+    // Porta de leitura A
+    input  wire [4:0]  rs1_addr,
     output wire [31:0] rs1_data,
 
-    // Porta de leitura B (rs2)
-    input  wire [3:0]  rs2,
+    // Porta de leitura B
+    input  wire [4:0]  rs2_addr,
     output wire [31:0] rs2_data,
 
-    // Porta de escrita
-    input  wire        we,         // write enable
-    input  wire [3:0]  rd,
-    input  wire [31:0] wd          // write data
+    // Porta de escrita (WB)
+    input  wire        wr_en,
+    input  wire [4:0]  wr_addr,
+    input  wire [31:0] wr_data,
+
+    // Acesso direto para debug / FPGA top
+    output wire [31:0] sp_out,   // R30
+    output wire [31:0] lr_out    // R31
 );
 
-    reg [31:0] regs [0:15];
+    reg [31:0] regs [0:31];
     integer i;
 
     // ------------------------------------------------------------------
-    // Escrita síncrona
+    // Escrita síncrona (R0 protegido contra escrita)
     // ------------------------------------------------------------------
     always @(posedge clk) begin
         if (rst) begin
-            for (i = 0; i < 16; i = i + 1)
-                regs[i] <= 32'h0;
-        end else if (we) begin
-            regs[rd] <= wd;
+            for (i = 0; i < 32; i = i + 1)
+                regs[i] <= 32'b0;
+        end else if (wr_en && wr_addr != 5'b0) begin
+            regs[wr_addr] <= wr_data;
         end
     end
 
     // ------------------------------------------------------------------
-    // Leitura combinacional
+    // Leitura combinacional (R0 sempre retorna 0)
     // ------------------------------------------------------------------
-    assign rs1_data = regs[rs1];
-    assign rs2_data = regs[rs2];
+    assign rs1_data = (rs1_addr == 5'b0) ? 32'b0 : regs[rs1_addr];
+    assign rs2_data = (rs2_addr == 5'b0) ? 32'b0 : regs[rs2_addr];
+
+    // Saídas especiais para monitoramento
+    assign sp_out = regs[30];
+    assign lr_out = regs[31];
 
 endmodule

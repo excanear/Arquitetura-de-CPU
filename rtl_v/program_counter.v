@@ -1,32 +1,37 @@
 // ============================================================================
-// program_counter.v  —  Contador de Programa — EduRISC-32
+// program_counter.v  —  Program Counter de 26 bits
 //
-// Mantém o PC de 28 bits e gera PC+1 para o pipeline.
-// Aceita carga de valor externo (branch/jump) com prioridade sobre incremento.
+// • PC current: saída registrada
+// • pc_plus1: PC+1 (próxima instrução sequencial)
+// • Entradas: stall congela PC; load_en escreve pc_load_val
+// • Reset: PC = 0 (endereço do bootloader/rstvec)
 // ============================================================================
 `timescale 1ns/1ps
+`include "isa_pkg.vh"
 
 module program_counter (
     input  wire        clk,
-    input  wire        rst,        // reset síncrono → PC = 0
-    input  wire        stall,      // congela PC quando asserted
-    input  wire        load,       // carrega pc_next quando asserted
-    input  wire [27:0] pc_next,    // valor a carregar (branch/jump target)
-    output reg  [27:0] pc,         // PC atual
-    output wire [27:0] pc_plus1    // PC + 1 (endereço da próxima instrução)
+    input  wire        rst,
+
+    // Controle
+    input  wire        stall,       // 1=congela PC (load-use hazard)
+    input  wire        load_en,     // 1=carrega pc_load_val
+    input  wire [25:0] pc_load_val, // novo PC (desvio/salto/trap)
+
+    // Saídas
+    output reg  [25:0] pc,
+    output wire [25:0] pc_plus1
 );
 
-    assign pc_plus1 = pc + 28'h1;
+    assign pc_plus1 = pc + 26'd1;
 
     always @(posedge clk) begin
         if (rst)
-            pc <= 28'h0;
-        else if (!stall) begin
-            if (load)
-                pc <= pc_next;
-            else
-                pc <= pc_plus1;
-        end
+            pc <= 26'b0;
+        else if (load_en)
+            pc <= pc_load_val;
+        else if (!stall)
+            pc <= pc_plus1;
     end
 
 endmodule

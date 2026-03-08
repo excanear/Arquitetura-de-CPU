@@ -1,89 +1,93 @@
 // ============================================================================
-// alu.v  —  Arithmetic Logic Unit — EduRISC-32
+// alu.v  —  Unidade Lógica e Aritmética (ALU) EduRISC-32v2
 //
-// Realiza todas as operações aritméticas e lógicas da CPU.
-// Gera flags ZERO, CARRY, NEGATIVE, OVERFLOW após cada operação.
+// Operações: ADD SUB MUL MULH DIV DIVU REM AND OR XOR NOT NEG
+//            SHL SHR SHRA SLT SLTU PASS_A PASS_B
 //
-// Interface:
-//   Entradas:  alu_op[3:0], a[31:0], b[31:0]
-//   Saídas:    result[31:0], flag_z, flag_c, flag_n, flag_v
+// Flags: ZERO(Z), CARRY(C), NEGATIVE(N), OVERFLOW(V), DIV_BY_ZERO(D)
+//
+// Notas:
+//  • MUL/MULH usam multiplicador de 64 bits (síntese infere DSP48E)
+//  • DIV/DIVU/REM: divisão por zero retorna 0xFFFFFFFF e levanta D
 // ============================================================================
 `timescale 1ns/1ps
 `include "isa_pkg.vh"
 
 module alu (
-    input  wire [3:0]  alu_op,   // código da operação (ALU_*)
-    input  wire [31:0] a,        // operando A (rs1)
-    input  wire [31:0] b,        // operando B (rs2 ou imediato)
-    output reg  [31:0] result,   // resultado
-    output wire        flag_z,   // Zero
-    output wire        flag_c,   // Carry / Borrow
-    output wire        flag_n,   // Negative
-    output reg         flag_v    // Overflow (apenas ADD/SUB)
+    input  wire [4:0]  alu_op,
+    input  wire [31:0] operand_a,
+    input  wire [31:0] operand_b,
+
+    output reg  [31:0] result,
+    output wire        flag_z,
+    output wire        flag_c,
+    output wire        flag_n,
+    output wire        flag_v,
+    output wire        flag_d     // divide by zero
 );
 
-    // ------------------------------------------------------------------
-    // Cálculo principal
-    // ------------------------------------------------------------------
-    reg [32:0] wide;   // 33 bits para capturar carry-out
+    // Auxiliares de 64 bits para multiplicação e carry
+    wire [63:0] mul_wide   = $signed(operand_a) * $signed(operand_b);
+    wire [63:0] mulu_wide  = operand_a * operand_b;
+    wire [32:0] add_wide   = {1'b0, operand_a} + {1'b0, operand_b};
+    wire [32:0] sub_wide   = {1'b0, operand_a} - {1'b0, operand_b};
+
+    reg [31:0] r_next;
+    reg        carry_out;
+    reg        div_zero;
 
     always @(*) begin
-        flag_v = 1'b0;
-        wide   = 33'b0;
+        r_next    = 32'b0;
+        carry_out = 1'b0;
+        div_zero  = 1'b0;
 
         case (alu_op)
-            `ALU_ADD: begin
-                wide   = {1'b0, a} + {1'b0, b};
-                result = wide[31:0];
-                // overflow: sinais iguais de entrada → sinal diferente na saída
-                flag_v = (~a[31] & ~b[31] & result[31]) |
-                         ( a[31] &  b[31] & ~result[31]);
-            end
-
-            `ALU_SUB, `ALU_CMP: begin
-                wide   = {1'b0, a} - {1'b0, b};
-                result = (alu_op == `ALU_CMP) ? 32'b0 : wide[31:0];
-                flag_v = ( a[31] & ~b[31] & ~result[31]) |
-                         (~a[31] &  b[31] &  result[31]);
-            end
-
-            `ALU_MUL: begin
-                result = a * b;           // 32 bits inferiores
-            end
-
-            `ALU_DIV: begin
-                result = (b != 0) ? (a / b) : 32'hFFFF_FFFF;  // div by zero → max
-            end
-
-            `ALU_AND: result = a & b;
-            `ALU_OR:  result = a | b;
-            `ALU_XOR: result = a ^ b;
-            `ALU_NOT: result = ~a;
-
-            `ALU_SHL: begin
-                result = a << b[4:0];     // shift por [4:0] (0-31)
-                wide   = {1'b0, a} << b[4:0];
-            end
-
-            `ALU_SHR: begin
-                result = a >> b[4:0];     // shift lógico à direita
-            end
-
-            `ALU_SHRS: begin
-                result = $signed(a) >>> b[4:0];  // shift aritmético
-            end
-
-            `ALU_PASS: result = a;
-
-            default:   result = 32'h0;
+            `ALU_ADD:  begin r_next = add_wide[31:0]; carry_out = add_wide[32]; end
+            `ALU_SUB:  begin r_next = sub_wide[31:0]; carry_out = sub_wide[32]; end
+            `ALU_MUL:  r_next = mul_wide[31:0];
+            `ALU_MULH: r_next = mul_wide[63:32];
+            `ALU_DIV:  begin
+                           if (operand_b == 0) begin r_next = 32'hFFFFFFFF; div_zero = 1; end
+                           else r_next = $signed(operand_a) / $signed(operand_b);
+                       end
+            `ALU_DIVU: begin
+                           if (operand_b == 0) begin r_next = 32'hFFFFFFFF; div_zero = 1; end
+                           else r_next = operand_a / operand_b;
+                       end
+            `ALU_REM:  begin
+                           if (operand_b == 0) begin r_next = operand_a; div_zero = 1; end
+                           else r_next = $signed(operand_a) % $signed(operand_b);
+                       end
+            `ALU_AND:  r_next = operand_a & operand_b;
+            `ALU_OR:   r_next = operand_a | operand_b;
+            `ALU_XOR:  r_next = operand_a ^ operand_b;
+            `ALU_NOT:  r_next = ~operand_a;
+            `ALU_NEG:  r_next = (~operand_a) + 32'd1;
+            `ALU_SHL:  r_next = operand_a << operand_b[4:0];
+            `ALU_SHR:  r_next = operand_a >> operand_b[4:0];
+            `ALU_SHRA: r_next = $signed(operand_a) >>> operand_b[4:0];
+            `ALU_SLT:  r_next = ($signed(operand_a) < $signed(operand_b)) ? 32'd1 : 32'd0;
+            `ALU_SLTU: r_next = (operand_a < operand_b) ? 32'd1 : 32'd0;
+            `ALU_PASS_A: r_next = operand_a;
+            `ALU_PASS_B: r_next = operand_b;
+            default:   r_next = 32'b0;
         endcase
     end
 
-    // ------------------------------------------------------------------
-    // Flags derivadas
-    // ------------------------------------------------------------------
-    assign flag_z = (result == 32'b0);
-    assign flag_n = result[31];
-    assign flag_c = wide[32];   // carry-out (válido para ADD/SUB/SHL)
+    always @(*) result = r_next;
+
+    // Flags
+    assign flag_z = (r_next == 32'b0);
+    assign flag_n = r_next[31];
+    assign flag_c = carry_out;
+    assign flag_d = div_zero;
+    // Overflow: válido apenas para ADD/SUB (dois complementos)
+    assign flag_v = (alu_op == `ALU_ADD) ?
+                        (~operand_a[31] & ~operand_b[31] & r_next[31]) |
+                        ( operand_a[31] &  operand_b[31] & ~r_next[31]) :
+                    (alu_op == `ALU_SUB) ?
+                        (~operand_a[31] &  operand_b[31] & r_next[31]) |
+                        ( operand_a[31] & ~operand_b[31] & ~r_next[31]) :
+                        1'b0;
 
 endmodule
