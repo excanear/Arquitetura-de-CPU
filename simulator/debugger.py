@@ -1,5 +1,5 @@
 """
-debugger.py — Debugger Educacional para EduRISC-16
+debugger.py — Debugger Educacional para EduRISC-32v2
 
 Interface interativa de linha de comando para depuração de programas.
 
@@ -46,7 +46,7 @@ class Debugger:
 
     BANNER = """
 ╔══════════════════════════════════════════════════════╗
-║          EduRISC-16  Debugger Educacional            ║
+║         EduRISC-32v2  Debugger Educacional           ║
 ║  Digite '?' ou 'help' para lista de comandos         ║
 ╚══════════════════════════════════════════════════════╝
 """

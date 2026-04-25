@@ -369,6 +369,19 @@ class Assembler:
                 rs1 = _parse_reg(ops[2], line)
                 return encode_i(opcode, rd, rs1, off)
 
+            if mnem == "MOVI":
+                # MOVI rd, imm16   — rs1 implícito = R0 (zero)
+                rd  = _parse_reg(ops[0], line)
+                imm = self._resolve(ops[1], line) & 0xFFFF
+                return encode_i(opcode, rd, 0, imm)
+
+            if mnem == "SLTI":
+                # SLTI rd, rs1, imm  (signed less-than immediate)
+                rd  = _parse_reg(ops[0], line)
+                rs1 = _parse_reg(ops[1], line)
+                imm = self._resolve(ops[2], line) & 0xFFFF
+                return encode_i(opcode, rd, rs1, imm)
+
             # padrão I: rd, rs1, imm
             rd  = _parse_reg(ops[0], line)
             rs1 = _parse_reg(ops[1], line)
