@@ -63,6 +63,10 @@ static void tp_putdec(uint8_t v)
     }
     t = v / 10u;
     u = v % 10u;
+    /* Suprime zeros à esquerda: imprime dezenas se houve centenas OU se dezenas != 0.
+     * Invariante: 'h != 0' implica que já imprimimos centenas acima; 't != 0' significa
+     * que o dígito de dezenas é significativo. Sem esta condição, "05" viraria "5"
+     * corretamente, mas "10" viraria "10" (correto) e "100" viraria "100" (correto). */
     if (h || t) {
         tp_putchar((char)('0' + t));
     }

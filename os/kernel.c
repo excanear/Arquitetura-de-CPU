@@ -80,8 +80,9 @@ void uart_puthex(int val) {
 /* ---------------------------------------------------------------------------
  * uart_putdec: envia um inteiro sem sinal em decimal (até 10 dígitos)
  * --------------------------------------------------------------------------- */
+#define MAX_DEC_DIGITS 10   /* int de 32 bits tem no máximo 10 dígitos decimais */
 void uart_putdec(int val) {
-    int  buf[10];
+    int  buf[MAX_DEC_DIGITS];
     int  len;
     int  i;
     int  uval;
@@ -99,7 +100,7 @@ void uart_putdec(int val) {
     }
 
     len = 0;
-    while (uval > 0 && len < 10) {
+    while (uval > 0 && len < MAX_DEC_DIGITS) {
         buf[len] = '0' + (uval % 10);
         uval = uval / 10;
         len = len + 1;

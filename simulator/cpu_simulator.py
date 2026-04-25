@@ -358,9 +358,16 @@ class CPUSimulator:
         if ide.ctrl.branch:
             taken = self._eval_branch(opcode, a, b)
             if taken:
-                # Destino = PC_branch + sext(off16)
-                # pc_plus1 = PC_branch + 1, portanto PC_branch = pc_plus1 - 1
-                jump_pc = (ide.pc_plus1 - 1 + ide.offset) & (len(self.mem) - 1)
+                # Cálculo do destino de branch (arquiteturalmente correto):
+                #   O PC da instrução de branch (PC_branch) é o endereço da
+                #   própria instrução. O pipeline armazena pc_plus1 = PC_branch + 1.
+                #   O offset off16 é relativo a PC_branch (não a pc_plus1), portanto:
+                #     target = PC_branch + off16 = (pc_plus1 - 1) + off16
+                #   A subtração de 1 recupera PC_branch a partir de pc_plus1.
+                #   Isso é equivalente ao que hardware RISC faz: EX usa PC salvo,
+                #   não PC incrementado, para calcular o endereço de destino.
+                pc_branch = ide.pc_plus1 - 1
+                jump_pc = (pc_branch + ide.offset) & (len(self.mem) - 1)
                 self.exmem.take_jump = True
                 self.exmem.jump_pc   = jump_pc
                 self._stage_dis["EX"] = f"BRANCH {opcode.name} TAKEN→0x{jump_pc:08X}"
