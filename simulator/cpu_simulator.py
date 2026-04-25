@@ -359,10 +359,14 @@ class CPUSimulator:
         # ---- SYSCALL / ERET ------------------------------------------------
         if ide.ctrl.syscall or ide.ctrl.eret:
             self._stage_dis["EX"] = opcode.name
+            if ide.ctrl.syscall:
+                # SYSCALL: salva PC+1 em CSR_EPC (índice 0) e salta para handler
+                # (handler não definido no sim — registra e continua)
+                self.csrs[0] = (self.pc) & WORD_MASK   # salva PC atual (após HLT pipeline)
             if ide.ctrl.eret:
-                # ERET: retorna para o endereço salvo (não implementado no sim simples)
+                # ERET: restaura PC a partir de CSR_EPC (índice 0)
                 self.exmem.take_jump = True
-                self.exmem.jump_pc   = 0
+                self.exmem.jump_pc   = self.csrs[0] & WORD_MASK
             return
 
         # ---- PUSH: SP--; Mem[SP] = rs1 ------------------------------------

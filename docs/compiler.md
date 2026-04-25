@@ -1,27 +1,39 @@
-# Compilador EduRISC-16 — Guia de Referência
+# Compilador EduRISC-32v2 — Guia de Referência
 
 ## Introdução
 
-O compilador EduRISC-16 converte um subconjunto da linguagem C para código assembly EduRISC-16. É um compilador educacional de **passa única** (lexer → parser → gerador de código) sem otimizações.
+O compilador EduRISC-32v2 converte um subconjunto da linguagem C para código assembly EduRISC-32v2. É um compilador educacional de **passa única** (pré-processo → lexer → parser → gerador de código) sem otimizações.
 
 ### Funcionalidades suportadas
 
-| Recurso                         | Suporte |
-|---------------------------------|:-------:|
-| Tipos: `int`                    | ✅      |
-| Declaração de variáveis         | ✅      |
-| Atribuição                      | ✅      |
-| Aritmética: `+`, `-`, `*`, `/`  | ✅      |
-| Comparação: `==`, `!=`, `<`, `>`, `<=`, `>=` | ✅ |
-| `if` / `else`                   | ✅      |
-| `while`                         | ✅      |
-| `return`                        | ✅      |
-| Funções sem parâmetros          | ✅      |
-| Funções com parâmetros          | ✅ (até 12) |
-| Arrays                          | ❌      |
-| Ponteiros                       | ❌      |
-| `for` loop                      | ❌ (use `while`) |
-| Recursão                        | ❌ (sem pilha de chamada) |
+| Recurso                                          | Suporte        |
+|--------------------------------------------------|:--------------:|
+| Tipos: `int`, `int *` (ponteiro)                 | ✅             |
+| Declaração de variáveis locais e globais          | ✅             |
+| Atribuição simples `=`                            | ✅             |
+| Atribuições compostas `+=`, `-=`, `*=`, `/=`, `%=`, `&=`, `\|=`, `^=`, `<<=`, `>>=` | ✅ |
+| Aritmética: `+`, `-`, `*`, `/`, `%`              | ✅             |
+| Shifts: `<<`, `>>`                               | ✅             |
+| Bitwise: `&`, `\|`, `^`, `~`                     | ✅             |
+| Lógicos com short-circuit: `&&`, `\|\|`, `!`     | ✅             |
+| Comparação: `==`, `!=`, `<`, `>`, `<=`, `>=`     | ✅             |
+| `if` / `else` / `else if`                        | ✅             |
+| `while`                                          | ✅             |
+| `for`                                            | ✅             |
+| `break` / `continue`                             | ✅             |
+| `return`                                         | ✅             |
+| Funções com parâmetros (até 24)                  | ✅             |
+| Funções void                                     | ✅             |
+| Arrays 1-D: `int a[N]`, `a[i]`, `a[i] = expr`   | ✅             |
+| Inicializadores de array: `int a[N] = {v1,...}`  | ✅             |
+| Ponteiros: `int *p`, `*p`, `&var`, `*p = expr`   | ✅ (globais/arrays) |
+| Literais hexadecimais: `0xFF`                    | ✅             |
+| Pré-processamento: `#define NOME valor`          | ✅             |
+| Variáveis globais                                | ✅             |
+| Arrays globais                                   | ✅             |
+| Recursão                                         | ❌ (ABI simples sem pilha de chamada completa) |
+| `float`, `double`                                | ❌             |
+| `struct`, `union`                                | ❌             |
 
 ---
 
@@ -30,20 +42,22 @@ O compilador EduRISC-16 converte um subconjunto da linguagem C para código asse
 ### Python API
 
 ```python
-from compiler import compile_source
+from compiler.compiler import compile_source
 
 asm_code = compile_source("""
+#define N 5
+
 int soma(int n) {
     int acc = 0;
     while (n) {
-        acc = acc + n;
-        n = n - 1;
+        acc += n;
+        n -= 1;
     }
     return acc;
 }
 
 int main() {
-    int resultado = soma(5);
+    int resultado = soma(N);
     return resultado;
 }
 """)
@@ -53,9 +67,10 @@ print(asm_code)
 ### Linha de Comando (via main.py)
 
 ```bash
-python main.py compile programa.c
-python main.py compile programa.c -o programa.asm
-python main.py compile --show-ast programa.c
+python main.py compile programa.c          # imprime assembly na tela
+python main.py compile programa.c -o prog.asm
+python main.py build   programa.c -o prog.hex   # compila + monta
+python main.py run     prog.asm                 # monta e executa
 ```
 
 ### Pipeline Completo (C → binário)
@@ -72,26 +87,72 @@ Equivale a: `compile` → `assemble` → escreve `.hex`
 
 ### Tipos
 
-Apenas `int` (inteiro sem sinal de 16 bits, 0–65535):
+- `int` — inteiro de 32 bits com sinal
+- `int *` — ponteiro (endereço de 32 bits)
+- `void` — tipo de retorno de função sem valor
 
 ```c
 int x = 10;
 int y;          // não inicializado = 0
+int *p;         // ponteiro
+int arr[5];     // array de 5 inteiros
+```
+
+### Pré-processamento: `#define`
+
+```c
+#define N   10
+#define MAX 0xFF
+
+int main() {
+    int x = N;        // equivale a  int x = 10;
+    int y = MAX & 15; // equivale a  int y = 0xFF & 15;
+    return y;         // → 15
+}
 ```
 
 ### Expressões Aritméticas
 
 ```c
 int a = x + y;
-int b = x * 3;     // cuidado: 16 bits (truncado)
-int c = (a + b) * 2;
+int b = x * 3;
+int c = (a + b) / 2;
+int d = a % 7;     // módulo (resto)
 ```
 
 Operadores:
-- `+` → `ADD`
-- `-` → `SUB`
-- `*` → `MUL`
-- `/` → `DIV` (inteiro, divisão por zero = 0xFFFF)
+- `+` → `ADD`     |  `-` → `SUB`
+- `*` → `MUL`     |  `/` → `DIV` (inteiro)
+- `%` → `REM` (resto)
+
+### Shifts
+
+```c
+int a = x << 3;    // deslocamento lógico à esquerda
+int b = x >> 1;    // deslocamento lógico à direita
+x <<= 2;           // atribuição composta
+```
+
+Operadores: `<<` → `SHL`, `>>` → `SHR`
+
+### Bitwise
+
+```c
+int a = x & 0xFF;   // AND
+int b = x | 0x80;   // OR
+int c = x ^ 0x55;   // XOR
+int d = ~x;         // NOT
+```
+
+### Operadores Lógicos (Short-Circuit)
+
+```c
+int ok = (a > 0) && (b > 0);   // && com short-circuit
+int any = (a != 0) || (b != 0); // || com short-circuit
+int nok = !a;                    // negação lógica
+```
+
+> `&&` e `||` geram código com short-circuit: o operando direito **não** é avaliado se o resultado já é determinado pelo esquerdo.
 
 ### Comparações
 
@@ -100,6 +161,22 @@ Retornam 1 (verdadeiro) ou 0 (falso):
 ```c
 if (x == 5) { ... }
 while (n != 0) { ... }
+if (a <= b && b <= c) { ... }
+```
+
+### Atribuições Compostas
+
+```c
+x += 5;     // x = x + 5
+x -= 3;     // x = x - 3
+x *= 2;     // x = x * 2
+x /= 4;     // x = x / 4
+x %= 7;     // x = x % 7
+x &= 0xF;   // x = x & 0xF
+x |= 0x1;   // x = x | 0x1
+x ^= 0xFF;  // x = x ^ 0xFF
+x <<= 2;    // x = x << 2
+x >>= 1;    // x = x >> 1
 ```
 
 ### Controle de Fluxo
@@ -107,6 +184,8 @@ while (n != 0) { ... }
 ```c
 if (cond) {
     // então
+} else if (outra_cond) {
+    // senão se
 } else {
     // senão (opcional)
 }
@@ -115,10 +194,48 @@ if (cond) {
 ```c
 while (cond) {
     // corpo
+    break;      // sai do loop
+    continue;   // vai para o próximo ciclo
 }
 ```
 
-> **Não** existe `for`, `do-while`, `break`, `continue`. Use `while` com controle manual.
+```c
+for (int i = 0; i < 10; i += 1) {
+    // corpo
+}
+```
+
+### Arrays 1-D
+
+```c
+int arr[5];              // declaração sem inicialização
+int v[3] = {10, 20, 30}; // com inicializador
+
+arr[0] = 42;             // escrita
+int x = arr[2];          // leitura
+
+// índice dinâmico
+int i = 2;
+arr[i] = arr[i - 1] + 1;
+```
+
+> Arrays são alocados no segmento de dados a partir do endereço `0x4000`.
+
+### Ponteiros
+
+```c
+int g = 10;
+int arr[4] = {1, 2, 3, 4};
+
+int *p;
+p = &g;          // endereço de variável global
+p = &arr[2];     // endereço de elemento de array
+
+int x = *p;      // leitura via ponteiro
+*p = 99;         // escrita via ponteiro
+```
+
+> `&` só é suportado para variáveis globais e elementos de arrays.
 
 ### Funções
 
@@ -127,11 +244,20 @@ int quadrado(int n) {
     return n * n;
 }
 
+void zera(int *p) {
+    *p = 0;
+}
+
 int main() {
-    int x = quadrado(4);
-    return x;
+    int x = quadrado(7);   // R1=resultado
+    zera(&x);              // passagem de ponteiro
+    return x;              // → 0
 }
 ```
+
+- Argumentos passados em R1, R2, ... (até 24 parâmetros)
+- Valor de retorno em R1
+- Funções `void` não definem R1
 
 - Máximo de **12 variáveis locais** por função
 - Resultado de retorno em `R0` (convenção)

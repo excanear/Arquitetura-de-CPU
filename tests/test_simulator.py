@@ -310,3 +310,40 @@ LOOP:
         HLT
     """)
     assert sim.rf[2] == 15
+
+
+# ---------------------------------------------------------------------------
+# ERET — retorno de exceção via CSR_EPC
+# ---------------------------------------------------------------------------
+
+def test_eret_restores_pc():
+    """SYSCALL salva PC em CSR[0]; ERET restaura PC a partir de CSR[0]."""
+    from assembler.assembler import Assembler
+    from simulator.cpu_simulator import CPUSimulator
+    from cpu.instruction_set import Opcode
+
+    # MTC CSR[0] = endereço alvo (0x5) manualmente, depois ERET
+    # Instruções:
+    #   0: MOVI R1, 5         → R1 = 5 (endereço de retorno)
+    #   1: MTC CSR[0], R1     → CSR[0] = 5 (sintaxe: MTC csr_idx, rs1)
+    #   2: ERET               → PC deve ir para 5
+    #   3: MOVI R2, 99        → NÃO deve executar (será pulado)
+    #   4: MOVI R2, 99        → NÃO deve executar
+    #   5: MOVI R3, 42        → deve executar
+    #   6: HLT
+    src = """
+        .org 0x000000
+        MOVI R1, 5
+        MTC  0, R1
+        ERET
+        MOVI R2, 99
+        MOVI R2, 99
+        MOVI R3, 42
+        HLT
+    """
+    words = Assembler().assemble(src)
+    sim   = CPUSimulator()
+    sim.load_program(words)
+    sim.run(max_cycles=200)
+    assert sim.rf[2] == 0, "R2 não deveria ter sido tocado"
+    assert sim.rf[3] == 42, f"R3 esperado 42, obteve {sim.rf[3]}"

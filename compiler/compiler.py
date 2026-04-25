@@ -2,35 +2,41 @@
 compiler.py — Compilador de linguagem C-like para Assembly EduRISC-32v2
 
 Pipeline de compilação:
-  texto fonte  →  tokens  →  AST  →  código assembly EduRISC-32v2
+  texto fonte  →  pré-processo  →  tokens  →  AST  →  código assembly EduRISC-32v2
 
 Suporta:
   - variáveis locais e globais: int x = expr;
-  - atribuição simples (=) e composta (+=, -=, *=, /=, &=, |=, ^=)
-  - expressões: +, -, *, /, &, |, ^, ~, !
+  - ponteiros: int *p;  *p;  &var;  &arr[i];  *p = expr;
+  - arrays 1-D: int a[N];  a[i];  a[i] = expr;  int a[N] = {v1, v2, ...};
+  - atribuição simples (=) e composta (+=, -=, *=, /=, %=, &=, |=, ^=, <<=, >>=)
+  - expressões: +, -, *, /, %, <<, >>, &, |, ^, ~, !, &&, ||
   - comparações: ==, !=, <, >, <=, >=  (retornam 0 ou 1)
   - if / else
   - while / for
   - break / continue
   - return expr;
-  - funções: int/void nome(int p1, int p2, ...) { ... }
+  - funções: int/void nome(int p1, int *p2, ...) { ... }
   - chamada de função com argumentos (passados em registradores)
+  - pré-processamento: #define NOME valor
 
 Modelo de execução:
   - R0  = zero hardwired (constante 0)
   - R1  = valor de retorno de função (convenção ABI)
   - R2–R25 disponíveis como variáveis locais / temporários
   - R30 = SP (stack pointer), R31 = LR (link register)
+  - R26 = scratch temporário (comparações/endereços)
   - Argumentos passados em R1, R2, ... (convenção simples de registrador)
-  - Variáveis globais armazenadas em posições de memória fixas
+  - Variáveis globais e arrays: armazenados em posições fixas de memória (segmento de dados)
 """
 
 import re
 from compiler.ast_nodes import (
-    Program, GlobalVarDecl, FuncDef, Stmt, Expr,
-    VarDecl, Assign, IfStmt, WhileStmt, ForStmt,
+    Program, GlobalVarDecl, GlobalArrayDecl, FuncDef, Stmt, Expr,
+    VarDecl, ArrayDecl, Assign, ArrayAssign, DerefAssign,
+    IfStmt, WhileStmt, ForStmt,
     ReturnStmt, BreakStmt, ContinueStmt, ExprStmt, Block,
     IntLiteral, VarRef, BinOp, UnaryOp, FuncCall,
+    ArrayRef, AddrOf, Deref,
 )
 
 
@@ -45,6 +51,33 @@ class CompileError(Exception):
 
 
 # ---------------------------------------------------------------------------
+# Pré-processador: #define NOME valor
+# ---------------------------------------------------------------------------
+
+def _preprocess(source: str) -> str:
+    """Substitui #define simples (sem macros com args) e remove linhas #include."""
+    defines: dict[str, str] = {}
+    out_lines: list[str] = []
+    for line in source.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#define"):
+            parts = stripped.split(None, 2)
+            if len(parts) >= 3:
+                defines[parts[1]] = parts[2].strip()
+            elif len(parts) == 2:
+                defines[parts[1]] = "1"
+            continue   # não inclui a linha #define no output
+        if stripped.startswith("#"):
+            continue   # ignora outras diretivas (#include, etc.)
+        out_lines.append(line)
+    result = "\n".join(out_lines)
+    # Aplica substituições (tokens inteiros, de mais longo para mais curto)
+    for name in sorted(defines, key=len, reverse=True):
+        result = re.sub(r"\b" + re.escape(name) + r"\b", defines[name], result)
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Lexer minimalista
 # ---------------------------------------------------------------------------
 
@@ -54,15 +87,20 @@ _LEX_SPEC = [
     ("NUMBER",   r"\b(?:0x[0-9A-Fa-f]+|\d+)\b"),
     ("KEYWORD",  r"\b(?:int|if|else|while|for|break|continue|return|void)\b"),
     ("IDENT",    r"[A-Za-z_]\w*"),
-    ("ASSIGNOP", r"\+=|-=|\*=|/=|&=|\|=|\^="),   # atribuições compostas
-    ("OP2",      r"==|!=|<=|>=|&&|\|\|"),
-    ("OP1",      r"[+\-*/=<>!~&|^]"),
+    # Atribuições compostas — ANTES dos operadores simples para match ganancioso
+    ("ASSIGNOP", r"\+=|-=|\*=|/=|%=|&=|\|=|\^=|<<=|>>="),
+    # Operadores de 2 chars — antes dos de 1 char
+    ("OP2",      r"==|!=|<=|>=|<<|>>|&&|\|\|"),
+    # Operadores de 1 char — inclui % e &
+    ("OP1",      r"[+\-*/=<>!~&|^%]"),
     ("SEMI",     r";"),
     ("COMMA",    r","),
     ("LPAREN",   r"\("),
     ("RPAREN",   r"\)"),
     ("LBRACE",   r"\{"),
     ("RBRACE",   r"\}"),
+    ("LBRACKET", r"\["),
+    ("RBRACKET", r"\]"),
     ("NL",       r"\n"),
     ("WS",       r"[ \t\r]+"),
 ]
@@ -92,8 +130,7 @@ def _lex(source: str) -> list[Token]:
             line += 1
             continue
         if kind == "NUMBER":
-            # Normaliza literais numéricos (suporte a hex 0x...)
-            tokens.append(Token(kind, str(int(value, 16 if value.startswith("0x") or value.startswith("0X") else 10)), line))
+            tokens.append(Token(kind, str(int(value, 16 if value.lower().startswith("0x") else 10)), line))
             continue
         tokens.append(Token(kind, value, line))
     return tokens
@@ -131,46 +168,75 @@ class _Parser:
     # ---- Programa / Funções ----
 
     def parse_program(self) -> Program:
-        globs: list[GlobalVarDecl] = []
-        funcs: list[FuncDef]       = []
+        globs: list = []
+        funcs: list[FuncDef] = []
         while self._peek():
             t = self._peek()
-            # Variável global: int nome [= expr] ;   (sem parêntese após nome)
             if t and t.kind == "KEYWORD" and t.value in ("int", "void"):
-                # Look-ahead: keyword IDENT ... → função se próximo de IDENT for '('
                 saved_pos = self._pos
-                self._consume()  # consome 'int'/'void'
+                ret_type = self._consume()   # consome 'int'/'void'
+                # verifica ponteiro em declaração global: int *nome ...
+                is_ptr = False
+                if self._match("OP1", "*"):
+                    self._consume()
+                    is_ptr = True
                 name_tok = self._expect("IDENT")
                 if self._match("LPAREN"):
-                    # É uma função — volta para reprocessar corretamente
+                    # Função — volta e reprocesa
                     self._pos = saved_pos
                     funcs.append(self._parse_func())
+                elif self._match("LBRACKET"):
+                    # Array global: int nome[N] [= {...}] ;
+                    self._consume()
+                    size_tok = self._expect("NUMBER")
+                    self._expect("RBRACKET")
+                    init = None
+                    if self._match("OP1", "="):
+                        self._consume()
+                        init = self._parse_brace_init()
+                    self._expect("SEMI")
+                    globs.append(GlobalArrayDecl(name_tok.value, int(size_tok.value), init, name_tok.line))
                 else:
-                    # É variável global
+                    # Variável global simples
                     init = None
                     if self._match("OP1", "="):
                         self._consume()
                         init = self._parse_expr()
                     self._expect("SEMI")
-                    globs.append(GlobalVarDecl(name_tok.value, init, name_tok.line))
+                    globs.append(GlobalVarDecl(name_tok.value, init, name_tok.line, is_ptr))
             else:
                 funcs.append(self._parse_func())
         return Program(globs, funcs)
 
+    def _parse_brace_init(self) -> list[Expr]:
+        self._expect("LBRACE")
+        items: list[Expr] = []
+        while not self._match("RBRACE"):
+            items.append(self._parse_expr())
+            if self._match("COMMA"):
+                self._consume()
+        self._expect("RBRACE")
+        return items
+
     def _parse_func(self) -> FuncDef:
-        # int ou void
-        ret_tok = self._consume()
+        ret_tok  = self._consume()   # int ou void
         name_tok = self._expect("IDENT")
         self._expect("LPAREN")
-        params = []
+        params:  list[str]  = []
+        is_ptrs: list[bool] = []
         while not self._match("RPAREN"):
             self._expect("KEYWORD", "int")
+            is_p = False
+            if self._match("OP1", "*"):
+                self._consume()
+                is_p = True
             params.append(self._expect("IDENT").value)
+            is_ptrs.append(is_p)
             if self._match("COMMA"):
                 self._consume()
         self._expect("RPAREN")
         body = self._parse_block()
-        return FuncDef(name_tok.value, params, body.stmts, name_tok.line)
+        return FuncDef(name_tok.value, params, is_ptrs, body.stmts, name_tok.line)
 
     def _parse_block(self) -> Block:
         t = self._expect("LBRACE")
@@ -205,19 +271,34 @@ class _Parser:
             return self._parse_return()
         if t.kind == "LBRACE":
             return self._parse_block()
-        # atribuição (simples ou composta) ou expr
         return self._parse_assign_or_expr()
 
-    def _parse_vardecl(self) -> VarDecl:
+    def _parse_vardecl(self) -> Stmt:
         line = self._peek().line
         self._expect("KEYWORD", "int")
+        # Ponteiro: int *p
+        is_ptr = False
+        if self._match("OP1", "*"):
+            self._consume()
+            is_ptr = True
         name = self._expect("IDENT").value
+        # Array: int a[N]
+        if self._match("LBRACKET"):
+            self._consume()
+            size_tok = self._expect("NUMBER")
+            self._expect("RBRACKET")
+            init = None
+            if self._match("OP1", "="):
+                self._consume()
+                init = self._parse_brace_init()
+            self._expect("SEMI")
+            return ArrayDecl(name, int(size_tok.value), init, line)
         init = None
         if self._match("OP1", "="):
             self._consume()
             init = self._parse_expr()
         self._expect("SEMI")
-        return VarDecl(name, init, line)
+        return VarDecl(name, init, line, is_ptr)
 
     def _parse_if(self) -> IfStmt:
         line = self._peek().line
@@ -271,7 +352,7 @@ class _Parser:
         if not self._match("SEMI"):
             cond = self._parse_expr()
         self._expect("SEMI")
-        # update — sem ';' final; consome até ')'
+        # update — sem ';' final
         update: Stmt | None = None
         if not self._match("RPAREN"):
             update = self._parse_assign_or_expr(expect_semi=False)
@@ -281,51 +362,139 @@ class _Parser:
 
     def _parse_assign_or_expr(self, expect_semi: bool = True) -> Stmt:
         line = self._peek().line
-        # tentativa de atribuição: IDENT ('=' | ASSIGNOP) expr ';'
+
+        # DerefAssign: *expr op= expr
+        if self._match("OP1", "*"):
+            saved = self._pos
+            self._consume()
+            # tenta parsear o ptr como expressão unária/primária
+            ptr_expr = self._parse_unary()
+            if self._peek() and (self._peek().kind == "OP1" and self._peek().value == "=" and
+                                  not self._match("OP2")):
+                op = self._consume().value   # '='
+                val = self._parse_expr()
+                if expect_semi:
+                    self._expect("SEMI")
+                return DerefAssign(ptr_expr, op, val, line)
+            if self._peek() and self._peek().kind == "ASSIGNOP":
+                op = self._consume().value
+                val = self._parse_expr()
+                if expect_semi:
+                    self._expect("SEMI")
+                return DerefAssign(ptr_expr, op, val, line)
+            # não é atribuição — volta e trata como expr_stmt
+            self._pos = saved
+
+        # Tentativa: IDENT [ '[' idx ']' ] (ASSIGNOP | '=') expr
         if self._match("IDENT"):
             name = self._peek().value
+            saved = self._pos
             self._consume()
-            # atribuição composta: +=, -=, *=, /=, &=, |=, ^=
-            if self._peek() and self._peek().kind == "ASSIGNOP":
-                op = self._consume().value   # ex: '+='
+
+            # a[i] op= expr
+            if self._match("LBRACKET"):
+                self._consume()
+                idx = self._parse_expr()
+                self._expect("RBRACKET")
+                if self._peek() and self._peek().kind == "ASSIGNOP":
+                    op = self._consume().value
+                    val = self._parse_expr()
+                    if expect_semi:
+                        self._expect("SEMI")
+                    return ArrayAssign(name, idx, op, val, line)
+                if self._match("OP1", "="):
+                    self._consume()
+                    val = self._parse_expr()
+                    if expect_semi:
+                        self._expect("SEMI")
+                    return ArrayAssign(name, idx, "=", val, line)
+                # não é atribuição — volta
+                self._pos = saved
+
+            # name ASSIGNOP expr
+            elif self._peek() and self._peek().kind == "ASSIGNOP":
+                op = self._consume().value
                 val = self._parse_expr()
                 if expect_semi:
                     self._expect("SEMI")
                 return Assign(name, op, val, line)
-            # atribuição simples
-            if self._match("OP1", "="):
+
+            # name '=' expr  (mas não '==')
+            elif self._match("OP1", "="):
                 self._consume()
                 val = self._parse_expr()
                 if expect_semi:
                     self._expect("SEMI")
                 return Assign(name, "=", val, line)
+
             else:
-                # não era atribuição — devolve o IDENT e trata como expr_stmt
-                self._pos -= 1
+                # não era atribuição — volta o IDENT
+                self._pos = saved
+
         expr = self._parse_expr()
         if expect_semi:
             self._expect("SEMI")
         return ExprStmt(expr, line)
 
-    # ---- Expressões (precedência manual) ----
+    # ---- Expressões (precedência crescente) --------------------------------
 
     def _parse_expr(self) -> Expr:
-        return self._parse_bitwise()
+        return self._parse_logical_or()
 
-    def _parse_bitwise(self) -> Expr:
+    def _parse_logical_or(self) -> Expr:
+        left = self._parse_logical_and()
+        while self._match("OP2", "||"):
+            op    = self._consume().value
+            right = self._parse_logical_and()
+            left  = BinOp(op, left, right, left.line)
+        return left
+
+    def _parse_logical_and(self) -> Expr:
+        left = self._parse_bitwise_or()
+        while self._match("OP2", "&&"):
+            op    = self._consume().value
+            right = self._parse_bitwise_or()
+            left  = BinOp(op, left, right, left.line)
+        return left
+
+    def _parse_bitwise_or(self) -> Expr:
+        left = self._parse_bitwise_xor()
+        while self._peek() and self._peek().kind == "OP1" and self._peek().value == "|":
+            op    = self._consume().value
+            right = self._parse_bitwise_xor()
+            left  = BinOp(op, left, right, left.line)
+        return left
+
+    def _parse_bitwise_xor(self) -> Expr:
+        left = self._parse_bitwise_and()
+        while self._peek() and self._peek().kind == "OP1" and self._peek().value == "^":
+            op    = self._consume().value
+            right = self._parse_bitwise_and()
+            left  = BinOp(op, left, right, left.line)
+        return left
+
+    def _parse_bitwise_and(self) -> Expr:
         left = self._parse_comparison()
-        while self._peek() and self._peek().kind == "OP1" and \
-              self._peek().value in ("&", "|", "^"):
+        while self._peek() and self._peek().kind == "OP1" and self._peek().value == "&":
             op    = self._consume().value
             right = self._parse_comparison()
             left  = BinOp(op, left, right, left.line)
         return left
 
     def _parse_comparison(self) -> Expr:
-        left = self._parse_additive()
+        left = self._parse_shift()
         while self._peek() and self._peek().kind in ("OP2", "OP1") and \
               self._peek().value in ("==", "!=", "<", ">", "<=", ">="):
-            op   = self._consume().value
+            op    = self._consume().value
+            right = self._parse_shift()
+            left  = BinOp(op, left, right, left.line)
+        return left
+
+    def _parse_shift(self) -> Expr:
+        left = self._parse_additive()
+        while self._peek() and self._peek().kind == "OP2" and \
+              self._peek().value in ("<<", ">>"):
+            op    = self._consume().value
             right = self._parse_additive()
             left  = BinOp(op, left, right, left.line)
         return left
@@ -340,7 +509,8 @@ class _Parser:
 
     def _parse_multiplicative(self) -> Expr:
         left = self._parse_unary()
-        while self._match("OP1", "*") or self._match("OP1", "/"):
+        while self._peek() and self._peek().kind == "OP1" and \
+              self._peek().value in ("*", "/", "%"):
             op    = self._consume().value
             right = self._parse_unary()
             left  = BinOp(op, left, right, left.line)
@@ -348,10 +518,26 @@ class _Parser:
 
     def _parse_unary(self) -> Expr:
         t = self._peek()
+        # Operadores unários aritméticos/lógicos
         if t and t.kind == "OP1" and t.value in ("-", "~", "!"):
             op  = self._consume().value
             operand = self._parse_unary()
             return UnaryOp(op, operand, t.line)
+        # Dereference: *expr
+        if t and t.kind == "OP1" and t.value == "*":
+            self._consume()
+            ptr = self._parse_unary()
+            return Deref(ptr, t.line)
+        # Address-of: &name  ou  &name[idx]
+        if t and t.kind == "OP1" and t.value == "&":
+            self._consume()
+            name_tok = self._expect("IDENT")
+            idx: Expr | None = None
+            if self._match("LBRACKET"):
+                self._consume()
+                idx = self._parse_expr()
+                self._expect("RBRACKET")
+            return AddrOf(name_tok.value, idx, t.line)
         return self._parse_primary()
 
     def _parse_primary(self) -> Expr:
@@ -375,6 +561,12 @@ class _Parser:
                         self._consume()
                 self._expect("RPAREN")
                 return FuncCall(t.value, args, t.line)
+            # indexação de array: a[i]
+            if self._match("LBRACKET"):
+                self._consume()
+                idx = self._parse_expr()
+                self._expect("RBRACKET")
+                return ArrayRef(t.value, idx, t.line)
             return VarRef(t.value, t.line)
 
         if t.kind == "LPAREN":
@@ -398,19 +590,20 @@ class CodeGen:
       - Variáveis locais são alocadas em registradores R2–R25.
       - R0  = zero hardwired.  R1 = retorno de função / arg 1.
       - R30 = SP, R31 = LR.
-      - R26 = scratch temporário para comparações.
+      - R26 = scratch temporário para comparações e endereços.
       - Argumentos passados em R1, R2, ... (máx 8 args).
-      - Variáveis globais: armazenadas em posições de memória no segmento de dados.
-      - Literais inteiros ≤ 16 bits → MOVI;  > 16 bits → MOVHI + ORI.
+      - Variáveis globais e arrays (locais e globais) armazenados em memória
+        a partir de _GLOBAL_BASE_ADDR.
       - break/continue usam uma pilha de labels de loop.
+      - && e || usam short-circuit com labels.
     """
 
-    _MAX_REGS  = 25   # R1–R25 disponíveis (R0=zero, R26=scratch, R27-R29=livres, R30=SP, R31=LR)
-    _FIRST_REG = 2    # alocação de locais começa em R2 (R1 = retorno / arg1)
-    _FLAGS_TMP = 26   # R26 reservado como scratch temporário de comparações
+    _MAX_REGS  = 25   # R1–R25 disponíveis
+    _FIRST_REG = 2    # alocação de locais começa em R2
+    _FLAGS_TMP = 26   # R26 reservado como scratch de comparações/endereços
 
-    # Endereço base para variáveis globais (segmento de dados separado do código)
-    _GLOBAL_BASE_ADDR = 0x8000
+    # Endereço base para variáveis globais e arrays (max 0x7FFF para caber em MOVI signed16)
+    _GLOBAL_BASE_ADDR = 0x4000
 
     def __init__(self):
         self._lines:    list[str]       = []
@@ -420,14 +613,17 @@ class CodeGen:
         self._current_func_name: str    = ""
         # Pilha de (lbl_continue, lbl_break) para loops aninhados
         self._loop_stack: list[tuple[str, str]] = []
-        # Variáveis globais: nome → endereço de memória
-        self._globals:     dict[str, int] = {}
-        self._global_next: int            = self._GLOBAL_BASE_ADDR
+        # Variáveis globais simples: nome → endereço de memória
+        self._globals:      dict[str, int]       = {}
+        # Arrays (locais e globais): nome → (endereço_base, tamanho)
+        self._arrays:       dict[str, tuple[int, int]] = {}
+        self._global_next:  int = self._GLOBAL_BASE_ADDR
 
     # ---- Interface pública ------------------------------------------------
 
     def compile(self, source: str) -> str:
         """Recebe texto fonte, retorna string com código assembly."""
+        source  = _preprocess(source)
         tokens  = _lex(source)
         parser  = _Parser(tokens)
         program = parser.parse_program()
@@ -436,16 +632,22 @@ class CodeGen:
     # ---- Geração de programa ----------------------------------------------
 
     def _gen_program(self, prog: Program) -> str:
-        self._lines     = []
-        self._label_cnt = 0
-        self._globals   = {}
+        self._lines       = []
+        self._label_cnt   = 0
+        self._globals     = {}
+        self._arrays      = {}
         self._global_next = self._GLOBAL_BASE_ADDR
 
-        # Registra variáveis globais (endereços serão emitidos ao final)
+        # Registra variáveis e arrays globais
         for gv in prog.globals:
-            addr = self._global_next
-            self._globals[gv.name] = addr
-            self._global_next += 1
+            if isinstance(gv, GlobalArrayDecl):
+                base = self._global_next
+                self._arrays[gv.name] = (base, gv.size)
+                self._global_next += gv.size
+            else:
+                addr = self._global_next
+                self._globals[gv.name] = addr
+                self._global_next += 1
 
         # Pula para main
         self._emit(".org 0x000000")
@@ -456,16 +658,29 @@ class CodeGen:
         for func in prog.functions:
             self._gen_func(func)
 
-        # Inicializa variáveis globais (seção de dados ao final)
-        if self._globals:
+        # Emite seção de dados (globais e arrays globais)
+        has_data = bool(self._globals) or any(
+            n in self._arrays for gv in prog.globals
+            if isinstance(gv, GlobalArrayDecl) for n in [gv.name]
+        )
+        if has_data or self._global_next > self._GLOBAL_BASE_ADDR:
             self._emit("; --- Dados globais ---")
             for gv in prog.globals:
-                addr = self._globals[gv.name]
-                val  = 0
-                if gv.init is not None and isinstance(gv.init, IntLiteral):
-                    val = gv.init.value
-                self._emit(f".org 0x{addr:06X}")
-                self._emit(f".word {val}  ; global {gv.name}")
+                if isinstance(gv, GlobalArrayDecl):
+                    base = self._arrays[gv.name][0]
+                    self._emit(f".org 0x{base:06X}  ; array {gv.name}[{gv.size}]")
+                    for i in range(gv.size):
+                        val = 0
+                        if gv.init and i < len(gv.init) and isinstance(gv.init[i], IntLiteral):
+                            val = gv.init[i].value  # type: ignore[union-attr]
+                        self._emit(f".word {val}  ; {gv.name}[{i}]")
+                else:
+                    addr = self._globals[gv.name]
+                    val  = 0
+                    if gv.init is not None and isinstance(gv.init, IntLiteral):
+                        val = gv.init.value
+                    self._emit(f".org 0x{addr:06X}")
+                    self._emit(f".word {val}  ; global {gv.name}")
 
         self._emit("")
         self._emit("; === FIM DO PROGRAMA ===")
@@ -512,16 +727,36 @@ class CodeGen:
                     if r != reg:
                         self._emit(f"MOV R{reg}, R{r}  ; {name} = R{r}")
 
+            case ArrayDecl(name=name, size=size, init=init, line=line):
+                # Aloca array em memória (segmento de dados fixo)
+                base = self._global_next
+                self._arrays[name] = (base, size)
+                self._global_next += size
+                # Emite dados do array inline (no segmento de código — só válido para programas simples)
+                # Alternativamente, inicializa via stores
+                if init:
+                    for i, expr in enumerate(init):
+                        r_val = self._gen_expr(expr)
+                        r_adr = self._FLAGS_TMP
+                        self._emit_load_imm(r_adr, base + i, f"&{name}[{i}]")
+                        self._emit(f"SW   R{r_val}, 0(R{r_adr})  ; {name}[{i}] = init")
+
             case Assign(name=name, op=op, value=value, line=line):
                 self._gen_assign(name, op, value, line)
 
-            case IfStmt(cond=cond, then_body=then_b, else_body=else_b, line=line):
+            case ArrayAssign(name=name, index=index, op=op, value=value, line=line):
+                self._gen_array_assign(name, index, op, value, line)
+
+            case DerefAssign(ptr=ptr, op=op, value=value, line=line):
+                self._gen_deref_assign(ptr, op, value, line)
+
+            case IfStmt(cond=cond, then_body=then_b, else_body=else_b):
                 self._gen_if(cond, then_b, else_b)
 
-            case WhileStmt(cond=cond, body=body, line=line):
+            case WhileStmt(cond=cond, body=body):
                 self._gen_while(cond, body)
 
-            case ForStmt(init=init, cond=cond, update=update, body=body, line=line):
+            case ForStmt(init=init, cond=cond, update=update, body=body):
                 self._gen_for(init, cond, update, body)
 
             case ReturnStmt(value=val, line=line):
@@ -553,51 +788,81 @@ class CodeGen:
                 for s in stmts:
                     self._gen_stmt(s)
 
-    # ---- Geração de atribuição -------------------------------------------
+    # ---- Atribuições especializadas ----------------------------------------
 
     def _gen_assign(self, name: str, op: str, value: Expr, line: int):
-        """Gera atribuição simples (=) ou composta (+=, -=, etc.)."""
-        # Verifica se é global ou local
+        """Gera atribuição simples (=) ou composta (+=, -=, etc.) para variável escalar."""
         if name in self._globals:
-            # Variável global: carrega endereço, opera e armazena
-            addr = self._globals[name]
-            r_addr = self._alloc_temp(line)
-            self._emit(f"MOVI R{r_addr}, 0x{addr:04X}  ; &{name}")
+            addr   = self._globals[name]
+            r_addr = self._FLAGS_TMP
+            self._emit_load_imm(r_addr, addr, f"&{name}")
             r_val  = self._gen_expr(value)
             if op == "=":
                 self._emit(f"SW R{r_val}, 0(R{r_addr})  ; {name} = R{r_val}")
             else:
                 r_cur = self._alloc_temp(line)
                 self._emit(f"LW R{r_cur}, 0(R{r_addr})  ; {name} (atual)")
-                base_op = op[:-1]   # '+=' → '+'
-                OP_MAP  = {"+": "ADD", "-": "SUB", "*": "MUL", "/": "DIV",
-                           "&": "AND", "|": "OR",  "^": "XOR"}
-                asm_op  = OP_MAP.get(base_op)
-                if asm_op is None:
-                    raise CompileError(f"Operador composto não suportado: {op}", line)
+                asm_op = self._compound_op(op, line)
                 self._emit(f"{asm_op} R{r_cur}, R{r_cur}, R{r_val}  ; {op}")
                 self._emit(f"SW R{r_cur}, 0(R{r_addr})  ; {name} = resultado")
             return
 
-        # Variável local
         reg = self._get_or_alloc_var(name, line)
         if op == "=":
-            if isinstance(value, BinOp):
+            if isinstance(value, BinOp) and value.op not in ("&&", "||"):
                 self._gen_binop_into(value.op, value.left, value.right, value.line, reg)
             else:
                 r = self._gen_expr(value)
                 if r != reg:
                     self._emit(f"MOV R{reg}, R{r}  ; {name} = R{r}")
         else:
-            # Atribuição composta: nome op= expr  →  nome = nome op expr
-            r_val  = self._gen_expr(value)
-            base_op = op[:-1]   # '+=' → '+'
-            OP_MAP  = {"+": "ADD", "-": "SUB", "*": "MUL", "/": "DIV",
-                       "&": "AND", "|": "OR",  "^": "XOR"}
-            asm_op  = OP_MAP.get(base_op)
-            if asm_op is None:
-                raise CompileError(f"Operador composto não suportado: {op}", line)
+            r_val   = self._gen_expr(value)
+            asm_op  = self._compound_op(op, line)
             self._emit(f"{asm_op} R{reg}, R{reg}, R{r_val}  ; {op}")
+
+    def _gen_array_assign(self, name: str, index: Expr, op: str, value: Expr, line: int):
+        """Gera atribuição a elemento de array: name[index] op= value."""
+        r_addr = self._array_elem_addr(name, index, line)
+        r_val  = self._gen_expr(value)
+        if op == "=":
+            self._emit(f"SW R{r_val}, 0(R{r_addr})  ; {name}[...] = R{r_val}")
+        else:
+            r_cur  = self._alloc_temp(line)
+            self._emit(f"LW R{r_cur}, 0(R{r_addr})  ; {name}[...] atual")
+            asm_op = self._compound_op(op, line)
+            self._emit(f"{asm_op} R{r_cur}, R{r_cur}, R{r_val}  ; {op}")
+            self._emit(f"SW R{r_cur}, 0(R{r_addr})  ; {name}[...] = resultado")
+
+    def _gen_deref_assign(self, ptr: Expr, op: str, value: Expr, line: int):
+        """Gera atribuição via ponteiro: *ptr op= value."""
+        r_ptr = self._gen_expr(ptr)
+        r_val = self._gen_expr(value)
+        if op == "=":
+            self._emit(f"SW R{r_val}, 0(R{r_ptr})  ; *ptr = R{r_val}")
+        else:
+            r_cur  = self._alloc_temp(line)
+            self._emit(f"LW R{r_cur}, 0(R{r_ptr})  ; *ptr atual")
+            asm_op = self._compound_op(op, line)
+            self._emit(f"{asm_op} R{r_cur}, R{r_cur}, R{r_val}  ; {op}")
+            self._emit(f"SW R{r_cur}, 0(R{r_ptr})  ; *ptr = resultado")
+
+    def _array_elem_addr(self, name: str, index: Expr, line: int) -> int:
+        """Calcula endereço de name[index] em um registrador; retorna nº do reg."""
+        if name not in self._arrays:
+            raise CompileError(f"Array não declarado: '{name}'", line)
+        base, _size = self._arrays[name]
+        r_adr = self._alloc_temp(line)
+        if isinstance(index, IntLiteral):
+            # Índice constante: calcula endereço diretamente
+            addr = base + index.value
+            self._emit_load_imm(r_adr, addr, f"&{name}[{index.value}]")
+        else:
+            # Índice dinâmico
+            r_base = self._alloc_temp(line)
+            r_idx  = self._gen_expr(index)
+            self._emit_load_imm(r_base, base, f"base {name}")
+            self._emit(f"ADD  R{r_adr}, R{r_base}, R{r_idx}  ; &{name}[idx]")
+        return r_adr
 
     # ---- Controle de fluxo ------------------------------------------------
 
@@ -640,7 +905,6 @@ class CodeGen:
         lbl_upd  = self._new_label("FOR_UPD")
         lbl_end  = self._new_label("FOR_END")
 
-        # init
         if init is not None:
             self._gen_stmt(init)
 
@@ -654,7 +918,6 @@ class CodeGen:
         for s in body:
             self._gen_stmt(s)
 
-        # continue salta para o update
         self._emit(f"{lbl_upd}:")
         if update is not None:
             self._gen_stmt(update)
@@ -672,32 +935,61 @@ class CodeGen:
                 return self._load_literal(v, line)
 
             case VarRef(name=n, line=line):
-                # Verifica se é global
                 if n in self._globals:
                     addr  = self._globals[n]
-                    r_adr = self._alloc_temp(line)
+                    r_adr = self._FLAGS_TMP
                     r_val = self._alloc_temp(line)
-                    self._emit(f"MOVI R{r_adr}, 0x{addr:04X}  ; &{n}")
+                    self._emit_load_imm(r_adr, addr, f"&{n}")
                     self._emit(f"LW   R{r_val}, 0(R{r_adr})   ; {n}")
                     return r_val
                 return self._get_or_alloc_var(n, line)
 
+            case ArrayRef(name=n, index=idx, line=line):
+                r_adr = self._array_elem_addr(n, idx, line)
+                r_val = self._alloc_temp(line)
+                self._emit(f"LW   R{r_val}, 0(R{r_adr})  ; {n}[...]")
+                return r_val
+
+            case AddrOf(name=n, index=idx, line=line):
+                # &n ou &n[idx]
+                if idx is None:
+                    # &variável escalar global
+                    if n in self._globals:
+                        addr  = self._globals[n]
+                        r_adr = self._alloc_temp(line)
+                        self._emit_load_imm(r_adr, addr, f"&{n}")
+                        return r_adr
+                    raise CompileError(f"'&' só suportado para globais e arrays: '{n}'", line)
+                else:
+                    # &arr[idx]
+                    return self._array_elem_addr(n, idx, line)
+
+            case Deref(ptr=ptr, line=line):
+                r_ptr = self._gen_expr(ptr)
+                r_val = self._alloc_temp(line)
+                self._emit(f"LW   R{r_val}, 0(R{r_ptr})  ; *ptr")
+                return r_val
+
             case BinOp(op=op, left=left, right=right, line=line):
+                if op == "&&":
+                    return self._gen_logical_and(left, right, line)
+                if op == "||":
+                    return self._gen_logical_or(left, right, line)
                 return self._gen_binop(op, left, right, line)
 
             case UnaryOp(op=op, operand=operand, line=line):
                 return self._gen_unary(op, operand, line)
 
             case FuncCall(name=name, args=args, line=line):
-                # Passa argumentos em R1, R2, ...
+                # Salva registradores de variáveis locais que sobrepõem os args
+                # (ABI simplificada: args em R1, R2, ...)
                 for i, arg in enumerate(args):
                     r = self._gen_expr(arg)
                     arg_reg = 1 + i
                     if r != arg_reg:
                         self._emit(f"MOV R{arg_reg}, R{r}  ; arg{i+1}")
                 self._emit(f"CALL {name.upper()}")
-                # Resultado em R1 por convenção ABI
-                return 1
+                return 1   # resultado em R1
 
             case _:
                 raise CompileError(f"Expressão não suportada: {type(expr).__name__}", 0)
@@ -711,14 +1003,14 @@ class CodeGen:
         rr = self._gen_expr(right)
         rd = dest_reg if dest_reg is not None else self._alloc_temp(line)
 
-        OP_MAP  = {"+": "ADD", "-": "SUB", "*": "MUL", "/": "DIV",
+        OP_MAP  = {"+": "ADD", "-": "SUB", "*": "MUL", "/": "DIV", "%": "REM",
+                   "<<": "SHL", ">>": "SHR",
                    "&": "AND", "|": "OR",  "^": "XOR"}
         CMP_OPS = {"==", "!=", "<", ">", "<=", ">="}
 
         if op in OP_MAP:
             self._emit(f"{OP_MAP[op]} R{rd}, R{rl}, R{rr}  ; {op}")
         elif op in CMP_OPS:
-            ft = self._FLAGS_TMP
             match op:
                 case "<":
                     self._emit(f"SLT R{rd}, R{rl}, R{rr}")
@@ -737,11 +1029,11 @@ class CodeGen:
                 case _:
                     lbl_t = self._new_label("CMP_T")
                     lbl_e = self._new_label("CMP_E")
-                    self._emit(f"SUB R{ft}, R{rl}, R{rr}")
+                    self._emit(f"SUB R{self._FLAGS_TMP}, R{rl}, R{rr}")
                     if op == "==":
-                        self._emit(f"BEQ R{ft}, R0, {lbl_t}")
+                        self._emit(f"BEQ R{self._FLAGS_TMP}, R0, {lbl_t}")
                     else:  # "!="
-                        self._emit(f"BNE R{ft}, R0, {lbl_t}")
+                        self._emit(f"BNE R{self._FLAGS_TMP}, R0, {lbl_t}")
                     self._emit(f"MOVI R{rd}, 0")
                     self._emit(f"JMP {lbl_e}")
                     self._emit(f"{lbl_t}:")
@@ -750,6 +1042,38 @@ class CodeGen:
         else:
             raise CompileError(f"Operador não suportado: '{op}'", line)
 
+        return rd
+
+    def _gen_logical_and(self, left: Expr, right: Expr, line: int) -> int:
+        """&& com short-circuit: se left==0 não avalia right."""
+        lbl_false = self._new_label("AND_FALSE")
+        lbl_end   = self._new_label("AND_END")
+        rd = self._alloc_temp(line)
+        rl = self._gen_expr(left)
+        self._emit(f"BEQ R{rl}, R0, {lbl_false}  ; && short-circuit")
+        rr = self._gen_expr(right)
+        self._emit(f"BEQ R{rr}, R0, {lbl_false}")
+        self._emit(f"MOVI R{rd}, 1")
+        self._emit(f"JMP {lbl_end}")
+        self._emit(f"{lbl_false}:")
+        self._emit(f"MOVI R{rd}, 0")
+        self._emit(f"{lbl_end}:")
+        return rd
+
+    def _gen_logical_or(self, left: Expr, right: Expr, line: int) -> int:
+        """|| com short-circuit: se left!=0 não avalia right."""
+        lbl_true = self._new_label("OR_TRUE")
+        lbl_end  = self._new_label("OR_END")
+        rd = self._alloc_temp(line)
+        rl = self._gen_expr(left)
+        self._emit(f"BNE R{rl}, R0, {lbl_true}  ; || short-circuit")
+        rr = self._gen_expr(right)
+        self._emit(f"BNE R{rr}, R0, {lbl_true}")
+        self._emit(f"MOVI R{rd}, 0")
+        self._emit(f"JMP {lbl_end}")
+        self._emit(f"{lbl_true}:")
+        self._emit(f"MOVI R{rd}, 1")
+        self._emit(f"{lbl_end}:")
         return rd
 
     def _gen_unary(self, op: str, operand: Expr, line: int) -> int:
@@ -776,15 +1100,31 @@ class CodeGen:
     def _load_literal(self, value: int, line: int) -> int:
         """Carrega literal inteiro em registrador: MOVI (16 bits) ou MOVHI+ORI (32 bits)."""
         rd = self._alloc_temp(line)
+        self._emit_load_imm(rd, value, f"literal {value}")
+        return rd
+
+    def _emit_load_imm(self, rd: int, value: int, comment: str = "") -> None:
+        """Emite instruções para carregar `value` em R{rd} (sem alocar reg)."""
+        cmt = f"  ; {comment}" if comment else ""
         if -32768 <= value <= 32767:
-            self._emit(f"MOVI R{rd}, {value}  ; literal {value}")
+            self._emit(f"MOVI R{rd}, {value}{cmt}")
         else:
             upper = (value >> 11) & 0x1FFFFF
             lower = value & 0xFFFF
-            self._emit(f"MOVHI R{rd}, 0x{upper:05X}  ; literal {value} (upper)")
+            self._emit(f"MOVHI R{rd}, 0x{upper:05X}{cmt}")
             if lower:
-                self._emit(f"ORI   R{rd}, R{rd}, 0x{lower:04X}  ; literal (lower)")
-        return rd
+                self._emit(f"ORI   R{rd}, R{rd}, 0x{lower:04X}")
+
+    def _compound_op(self, op: str, line: int) -> str:
+        """Converte operador composto (+=, %=, <<=, ...) para mnemônico ASM."""
+        _MAP = {"+": "ADD", "-": "SUB", "*": "MUL", "/": "DIV", "%": "REM",
+                "<<": "SHL", ">>": "SHR",
+                "&": "AND", "|": "OR", "^": "XOR"}
+        base = op[:-1]   # '+=' → '+'  ou  '<<=' → '<<'
+        asm  = _MAP.get(base)
+        if asm is None:
+            raise CompileError(f"Operador composto não suportado: {op}", line)
+        return asm
 
     def _alloc_var(self, name: str, line: int) -> int:
         if name in self._var_reg:
@@ -800,13 +1140,7 @@ class CodeGen:
     def _alloc_temp(self, line: int) -> int:
         return self._alloc_var(f"__tmp{self._next_reg}", line)
 
-    def _get_var(self, name: str, line: int) -> int:
-        if name not in self._var_reg:
-            raise CompileError(f"Variável não declarada: '{name}'", line)
-        return self._var_reg[name]
-
     def _get_or_alloc_var(self, name: str, line: int) -> int:
-        """Retorna reg se já alocado, aloca novo se não existir."""
         if name in self._var_reg:
             return self._var_reg[name]
         return self._alloc_var(name, line)
@@ -832,6 +1166,7 @@ def compile_source(source: str) -> str:
 
 def parse_source(source: str):
     """Faz o parsing do codigo fonte e retorna o AST (Program)."""
+    source  = _preprocess(source)
     tokens  = _lex(source)
     parser  = _Parser(tokens)
     return parser.parse_program()
