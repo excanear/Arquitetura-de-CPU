@@ -1,4 +1,4 @@
-/* fibonacci.c — calcula N! iterativamente usando arrays
+/* fibonacci.c — calcula os primeiros N números de Fibonacci usando um array
  * Armazena os primeiros N números de Fibonacci em um array
  * e retorna o N-ésimo elemento.
  *
