@@ -12,50 +12,32 @@
  *   - UART para output de debug
  * ============================================================================ */
 
-/* ---------------------------------------------------------------------------
- * Constantes do sistema
- * --------------------------------------------------------------------------- */
-#define MAX_PROCS       8
-#define STACK_SIZE      256        /* words por processo */
-#define DMEM_BASE       0x0000
-#define STACK_TOP       0xFFFF
-#define UART_TXDATA     0xFF00     /* endereço do registrador UART TX */
-#define TIMER_CMP_ADDR  0xFF10     /* endereço do comparador do timer */
-#define TIMER_QUANTUM   10000      /* ciclos por quantum de tempo */
-
-/* Endereços fixos em DMEM */
-#define TICK_COUNTER    0x0FF0
-#define PROC_TABLE      0x1000     /* início da tabela de processos */
+#include "os_defs.h"
 
 /* ---------------------------------------------------------------------------
- * Tipos básicos
+ * Variável global: índice do processo atual e contagem total de processos
  * --------------------------------------------------------------------------- */
-#define NULL  0
-#define TRUE  1
-#define FALSE 0
-
-/* ---------------------------------------------------------------------------
- * Tabela de processos (armazenada em DMEM a partir de PROC_TABLE)
- * Cada entrada: [0]=pid [1]=estado [2]=pc_saved [3]=sp_saved [4..15]=regs
- * --------------------------------------------------------------------------- */
-#define PROC_FREE    0
-#define PROC_READY   1
-#define PROC_RUNNING 2
-#define PROC_BLOCKED 3
-
-#define ENTRY_SIZE   16    /* words por entrada na tabela */
-
-/* Variável global: índice do processo atual */
 int current_pid;
 int num_procs;
 
 /* ---------------------------------------------------------------------------
- * uart_putchar: envia um caractere pela UART
+ * Declaração antecipada de funções definidas em outros módulos
+ * (necessária para que kernel_main() possa referenciar demo_process e
+ *  a função de escalonamento do scheduler.c)
+ * --------------------------------------------------------------------------- */
+void demo_process(void);   /* definida em scheduler.c */
+
+/* ---------------------------------------------------------------------------
+ * uart_putchar: envia um caractere pela UART (busy-wait no TX_READY)
  * --------------------------------------------------------------------------- */
 void uart_putchar(int c) {
-    int *uart;
-    uart = UART_TXDATA;
-    *uart = c;
+    int *uart_status;
+    int *uart_tx;
+    uart_status = (int *)UART_STATUS;
+    uart_tx     = (int *)UART_TXDATA;
+    /* Aguarda UART pronta para transmitir (bit UART_TX_READY) */
+    while ((*uart_status & UART_TX_READY) == 0) { }
+    *uart_tx = c;
 }
 
 /* ---------------------------------------------------------------------------
@@ -63,6 +45,9 @@ void uart_putchar(int c) {
  * --------------------------------------------------------------------------- */
 void uart_puts(int *s) {
     int i;
+    if (s == (int *)0) {
+        return;
+    }
     i = 0;
     while (s[i] != 0) {
         uart_putchar(s[i]);
@@ -71,7 +56,7 @@ void uart_puts(int *s) {
 }
 
 /* ---------------------------------------------------------------------------
- * uart_puthex: envia um número em hexadecimal (8 dígitos)
+ * uart_puthex: envia um número em hexadecimal (8 dígitos, prefixo 0x)
  * --------------------------------------------------------------------------- */
 void uart_puthex(int val) {
     int i;
@@ -93,6 +78,41 @@ void uart_puthex(int val) {
 }
 
 /* ---------------------------------------------------------------------------
+ * uart_putdec: envia um inteiro sem sinal em decimal (até 10 dígitos)
+ * --------------------------------------------------------------------------- */
+void uart_putdec(int val) {
+    int  buf[10];
+    int  len;
+    int  i;
+    int  uval;
+
+    if (val < 0) {
+        uart_putchar('-');
+        uval = -val;
+    } else {
+        uval = val;
+    }
+
+    if (uval == 0) {
+        uart_putchar('0');
+        return;
+    }
+
+    len = 0;
+    while (uval > 0 && len < 10) {
+        buf[len] = '0' + (uval % 10);
+        uval = uval / 10;
+        len = len + 1;
+    }
+    /* Imprime dígitos em ordem inversa */
+    i = len - 1;
+    while (i >= 0) {
+        uart_putchar(buf[i]);
+        i = i - 1;
+    }
+}
+
+/* ---------------------------------------------------------------------------
  * proc_alloc: aloca uma entrada livre na tabela de processos
  * Retorna: pid alocado, ou -1 se tabela cheia
  * --------------------------------------------------------------------------- */
@@ -101,67 +121,69 @@ int proc_alloc() {
     int *entry;
     i = 0;
     while (i < MAX_PROCS) {
-        entry = PROC_TABLE + i * ENTRY_SIZE;
-        if (*entry == PROC_FREE) {
-            *entry = PROC_READY;
+        entry = (int *)(PROC_TABLE + i * ENTRY_SIZE);
+        if (entry[FIELD_STATE] == PROC_FREE) {
+            entry[FIELD_STATE] = PROC_READY;
             return i;
         }
         i = i + 1;
     }
-    return -1;
+    return PID_INVALID;
 }
 
 /* ---------------------------------------------------------------------------
- * proc_create: cria um novo processo
- * entry_point: endereço de início do processo
+ * proc_create: cria um novo processo a partir de um endereço de entrada
+ * entry_point: endereço de início do código do processo
+ * Retorna: pid criado, ou -1 se falha
  * --------------------------------------------------------------------------- */
 int proc_create(int entry_point) {
     int pid;
     int *entry;
     pid = proc_alloc();
     if (pid < 0) {
-        return -1;
+        return PID_INVALID;
     }
-    entry = PROC_TABLE + pid * ENTRY_SIZE;
-    entry[0] = pid;              /* pid */
-    entry[1] = PROC_READY;      /* estado */
-    entry[2] = entry_point;     /* PC inicial */
-    /* SP inicial: topo da pilha deste processo */
-    entry[3] = STACK_TOP - pid * STACK_SIZE;
+    entry = (int *)(PROC_TABLE + pid * ENTRY_SIZE);
+    entry[FIELD_PID]   = pid;
+    entry[FIELD_STATE] = PROC_READY;
+    entry[FIELD_PC]    = entry_point;
+    /* SP inicial: topo da pilha deste processo (não sobrepõe outros processos) */
+    entry[FIELD_SP]    = STACK_TOP - pid * STACK_SIZE;
     num_procs = num_procs + 1;
     return pid;
 }
 
 /* ---------------------------------------------------------------------------
- * schedule: seleciona o próximo processo pronto (round-robin)
+ * schedule: seleciona o próximo processo pronto para rodar (round-robin)
+ * Retorna: pid do próximo processo READY; retorna current_pid se nenhum
  * --------------------------------------------------------------------------- */
 int schedule() {
     int i;
     int next;
     int *entry;
-    i = (current_pid + 1) & 7;   /* módulo MAX_PROCS */
-    next = -1;
+    i = (current_pid + 1) & (MAX_PROCS - 1);   /* módulo MAX_PROCS (potência de 2) */
+    next = PID_INVALID;
     while (i != current_pid) {
-        entry = PROC_TABLE + i * ENTRY_SIZE;
-        if (entry[1] == PROC_READY) {
+        entry = (int *)(PROC_TABLE + i * ENTRY_SIZE);
+        if (entry[FIELD_STATE] == PROC_READY) {
             next = i;
-            i = current_pid;    /* break */
-        } else {
-            i = (i + 1) & 7;
+            break;
         }
+        i = (i + 1) & (MAX_PROCS - 1);
     }
     if (next < 0) {
-        next = current_pid;     /* manter se ninguém pronto */
+        next = current_pid;     /* manter processo atual se nenhum pronto */
     }
     return next;
 }
 
 /* ---------------------------------------------------------------------------
- * idle_task: processo ocioso (loop infinito de NOP)
+ * idle_task: processo ocioso — roda quando não há nada a fazer
  * --------------------------------------------------------------------------- */
 void idle_task() {
-    while (TRUE) {
-        /* NOP — espera próxima interrupção de timer */
+    while (1) {
+        /* Aguarda interrupção do timer sem consumir recursos úteis.
+         * Em hardware real seria substituído por HLT/WFI. */
     }
 }
 
@@ -170,32 +192,41 @@ void idle_task() {
  * --------------------------------------------------------------------------- */
 void kernel_main() {
     int *timer_cmp;
+    int *tick_ptr;
 
     /* Inicializar variáveis globais */
     current_pid = 0;
     num_procs   = 0;
 
-    /* Exibir mensagem de boot */
-    uart_puts("EduRISC-32v2 Kernel\n");
-    uart_puts("Inicializando...\n");
+    /* Zerar contador de ticks */
+    tick_ptr  = (int *)TICK_COUNTER;
+    *tick_ptr = 0;
 
-    /* Inicializar tabela de processos */
+    /* Exibir mensagem de boot */
+    uart_puts("EduRISC-32v2 Kernel v1.0\n");
+    uart_puts("Inicializando subsistemas...\n");
+
+    /* Inicializar heap de memória */
     memory_init();
+    uart_puts("  [OK] Memoria: heap inicializado\n");
 
     /* Configurar timer para quantum de preempção */
-    timer_cmp  = TIMER_CMP_ADDR;
+    timer_cmp  = (int *)TIMER_CMP_ADDR;
     *timer_cmp = TIMER_QUANTUM;
+    uart_puts("  [OK] Timer: quantum=");
+    uart_putdec(TIMER_QUANTUM);
+    uart_puts(" ciclos\n");
 
-    /* Criar processo idle (PID 0) */
+    /* Criar processo idle (PID 0) — sempre pronto */
     proc_create(idle_task);
+    uart_puts("  [OK] Processo idle criado (PID 0)\n");
 
     /* Criar processo de demonstração (PID 1) */
     proc_create(demo_process);
+    uart_puts("  [OK] Processo demo criado (PID 1)\n");
 
-    uart_puts("Kernel pronto. Processos iniciados.\n");
+    uart_puts("Kernel pronto. Aguardando interrupcoes...\n");
 
-    /* Loop principal do kernel: esperar interrupções */
-    while (TRUE) {
-        /* O timer irá preemptar e chamar schedule() */
-    }
+    /* Loop principal: o timer interrompe e chama o escalonador */
+    while (1) { }
 }
