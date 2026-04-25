@@ -37,6 +37,10 @@ _COND_BRANCHES = frozenset({
     Opcode.BEQ, Opcode.BNE, Opcode.BLT, Opcode.BGE, Opcode.BLTU, Opcode.BGEU,
 })
 
+# Endereço inicial do stack pointer (topo da área de pilha, crescendo para baixo).
+# Mantido separado do segmento de código (0x000000–) e dados intermediários.
+_SP_INIT: int = 0x010000   # 64 K → área de pilha começa em 0x00FFFF downward
+
 
 # ---------------------------------------------------------------------------
 # Estado do Simulador
@@ -100,6 +104,9 @@ class CPUSimulator:
         self.hazard: HazardUnit     = HazardUnit()
         self.fwd:    ForwardingUnit = ForwardingUnit()
 
+        # Banco de 32 Registradores de Controle e Status (CSRs)
+        self.csrs: list[int] = [0] * 32
+
         self.pc:            int  = 0
         self.halted:        bool = False
         self.fetch_stopped: bool = False   # HLT visto em EX: para de buscar
@@ -117,6 +124,9 @@ class CPUSimulator:
             "IF": "--", "ID": "--", "EX": "--", "MEM": "--", "WB": "--"
         }
 
+        # SP (R30) inicializado no topo da área de pilha (cresce para baixo)
+        self.rf[SP_REG] = _SP_INIT
+
     # -----------------------------------------------------------------------
     # Carregamento e reset
     # -----------------------------------------------------------------------
@@ -132,6 +142,7 @@ class CPUSimulator:
     def reset(self):
         """Reinicia CPU (mantém conteúdo de memória)."""
         self.rf     = RegisterFile()
+        self.csrs   = [0] * 32
         self.pc     = 0
         self.halted = False
         self.fetch_stopped = False
@@ -143,6 +154,8 @@ class CPUSimulator:
         self.stats   = SimStats()
         self.log     = []
         self._stage_dis = {s: "--" for s in ("IF", "ID", "EX", "MEM", "WB")}
+        # SP (R30) inicializado no topo da área de pilha
+        self.rf[SP_REG] = _SP_INIT
 
     # -----------------------------------------------------------------------
     # Interface de execução
@@ -250,20 +263,53 @@ class CPUSimulator:
             self._stage_dis["MEM"] = "--"
             return False, 0
 
-        # Load
+        # Load — com suporte a byte (LB/LBU), halfword (LH/LHU) e word (LW)
         if exm.ctrl.mem_read:
-            addr = exm.mem_addr & (len(self.mem) - 1)
-            data = self.mem[addr]
+            addr     = exm.mem_addr & (len(self.mem) - 1)
+            raw_word = self.mem[addr]
+            size     = exm.ctrl.mem_size   # 0=byte, 1=halfword, 2=word
+
+            if size == 0:   # byte: extrai byte dentro da word de 32 bits
+                byte_off = exm.mem_addr & 3          # posição 0–3 dentro da word
+                data = (raw_word >> (byte_off * 8)) & 0xFF
+                if exm.ctrl.mem_signed and (data & 0x80):
+                    data |= 0xFFFFFF00               # sign-extend para 32 bits
+            elif size == 1: # halfword: extrai 16 bits alinhados a 2 bytes
+                half_off = exm.mem_addr & 2          # posição 0 ou 2
+                data = (raw_word >> (half_off * 8)) & 0xFFFF
+                if exm.ctrl.mem_signed and (data & 0x8000):
+                    data |= 0xFFFF0000               # sign-extend para 32 bits
+            else:           # word: leitura completa de 32 bits
+                data = raw_word
+
+            data &= WORD_MASK
             self.memwb.mem_data = data
             self.stats.memory_reads += 1
-            self._stage_dis["MEM"] = f"LOAD [0x{addr:08X}]→0x{data:08X}"
+            sz_name = ("B", "H", "W")[size]
+            self._stage_dis["MEM"] = f"LOAD{sz_name} [0x{addr:08X}]→0x{data:08X}"
 
-        # Store
+        # Store — com suporte a byte (SB), halfword (SH) e word (SW)
         elif exm.ctrl.mem_write:
             addr = exm.mem_addr & (len(self.mem) - 1)
-            self.mem[addr] = exm.rs2_val & WORD_MASK
+            size = exm.ctrl.mem_size   # 0=byte, 1=halfword, 2=word
+            val  = exm.rs2_val & WORD_MASK
+
+            if size == 0:   # byte: sobrescreve apenas o byte na posição correta
+                byte_off = exm.mem_addr & 3
+                shift    = byte_off * 8
+                mask     = ~(0xFF << shift) & WORD_MASK
+                self.mem[addr] = (self.mem[addr] & mask) | ((val & 0xFF) << shift)
+            elif size == 1: # halfword: sobrescreve 16 bits na posição correta
+                half_off = exm.mem_addr & 2
+                shift    = half_off * 8
+                mask     = ~(0xFFFF << shift) & WORD_MASK
+                self.mem[addr] = (self.mem[addr] & mask) | ((val & 0xFFFF) << shift)
+            else:           # word: escreve 32 bits completos
+                self.mem[addr] = val
+
             self.stats.memory_writes += 1
-            self._stage_dis["MEM"] = f"STORE [0x{addr:08X}]←0x{exm.rs2_val:08X}"
+            sz_name = ("B", "H", "W")[size]
+            self._stage_dis["MEM"] = f"STORE{sz_name} [0x{addr:08X}]←0x{val:08X}"
             self.stats.instructions += 1   # stores não têm WB
 
         else:
@@ -418,6 +464,25 @@ class CPUSimulator:
         # Para MOVI: b já contém o imediato (sign-extended) preparado em ID
         # Para MOVHI: b contém imm21 (ALU faz b<<11)
         # Para MOV: b contém rs1_val (via rs2_val=rs1_val no ID)
+
+        # ---- MFC: rd ← CSR[idx] -------------------------------------------
+        if opcode == Opcode.MFC:
+            csr_idx = ide.rs2_val & 0x1F   # índice CSR nos bits [4:0] do imediato
+            val = self.csrs[csr_idx] & WORD_MASK
+            self.exmem.alu_result = val
+            self.exmem.rd = ide.rd
+            self._stage_dis["EX"] = f"MFC R{ide.rd} ← CSR[{csr_idx}]=0x{val:08X}"
+            return
+
+        # ---- MTC: CSR[idx] ← rs1 ------------------------------------------
+        if opcode == Opcode.MTC:
+            csr_idx = ide.rs2_val & 0x1F   # índice CSR nos bits [4:0] do imediato
+            self.csrs[csr_idx] = a & WORD_MASK
+            self.exmem.rd = 0              # MTC não escreve registrador
+            self._stage_dis["EX"] = f"MTC CSR[{csr_idx}] ← 0x{a:08X}"
+            self.stats.instructions += 1
+            return
+
         result = self.alu.execute(opcode, a, b)
         self.exmem.alu_result = result.value
 
@@ -623,6 +688,12 @@ class CPUSimulator:
         print("  Registradores:")
         print(self.rf.dump())
         print(f"\n  Flags: {self.rf.flags}")
+        # Exibe apenas CSRs com valor não-zero
+        csr_nz = [(i, v) for i, v in enumerate(self.csrs) if v]
+        if csr_nz:
+            print("\n  CSRs (não-zero):")
+            for idx, val in csr_nz:
+                print(f"    CSR[{idx:2d}] = 0x{val:08X}  ({val})")
         print(f"\n  Estatísticas:")
         print(f"    Ciclos:           {self.stats.cycles}")
         print(f"    Instruções:       {self.stats.instructions}")

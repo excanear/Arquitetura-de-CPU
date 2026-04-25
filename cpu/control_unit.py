@@ -31,23 +31,26 @@ from cpu.instruction_set import (
 
 @dataclass
 class ControlSignals:
-    alu_src:   bool = False   # True → usa imediato/offset como operando B
-    mem_read:  bool = False   # True → lê memória (load)
-    mem_write: bool = False   # True → escreve memória (store)
-    reg_write: bool = False   # True → escreve em registrador (WB)
-    branch:    bool = False   # True → desvio condicional (comparação de regs)
-    jump:      bool = False   # True → salto incondicional
-    halt:      bool = False   # True → para execução após drenar pipeline
-    call:      bool = False   # True → CALL/CALLR (salva LR=R31)
-    ret:       bool = False   # True → RET (PC ← R31)
-    is_nop:    bool = False   # True → bolha de pipeline
-    push:      bool = False   # True → PUSH (SP--, Mem[SP]=rs1)
-    pop:       bool = False   # True → POP  (rd=Mem[SP], SP++)
-    eret:      bool = False   # True → ERET (retorno de exceção)
-    syscall:   bool = False   # True → SYSCALL
+    alu_src:    bool = False   # True → usa imediato/offset como operando B
+    mem_read:   bool = False   # True → lê memória (load)
+    mem_write:  bool = False   # True → escreve memória (store)
+    reg_write:  bool = False   # True → escreve em registrador (WB)
+    branch:     bool = False   # True → desvio condicional (comparação de regs)
+    jump:       bool = False   # True → salto incondicional
+    halt:       bool = False   # True → para execução após drenar pipeline
+    call:       bool = False   # True → CALL/CALLR (salva LR=R31)
+    ret:        bool = False   # True → RET (PC ← R31)
+    is_nop:     bool = False   # True → bolha de pipeline
+    push:       bool = False   # True → PUSH (SP--, Mem[SP]=rs1)
+    pop:        bool = False   # True → POP  (rd=Mem[SP], SP++)
+    eret:       bool = False   # True → ERET (retorno de exceção)
+    syscall:    bool = False   # True → SYSCALL
+    mem_size:   int  = 2       # 0=byte, 1=halfword, 2=word (para loads/stores)
+    mem_signed: bool = True    # True → sign-extend em loads (LB, LH); False → zero-extend (LBU, LHU)
 
     def __repr__(self) -> str:
-        active = [f.upper() for f, v in self.__dict__.items() if v]
+        active = [f.upper() for f, v in self.__dict__.items()
+                  if isinstance(v, bool) and v]
         return f"Ctrl[{' '.join(active) if active else 'NOP'}]"
 
 
@@ -118,11 +121,27 @@ class ControlUnit:
             ctrl.mem_read  = True
             ctrl.reg_write = True
             ctrl.alu_src   = True   # endereço = rs1 + sext(off16)
+            if opcode == Opcode.LB:
+                ctrl.mem_size = 0; ctrl.mem_signed = True
+            elif opcode == Opcode.LBU:
+                ctrl.mem_size = 0; ctrl.mem_signed = False
+            elif opcode == Opcode.LH:
+                ctrl.mem_size = 1; ctrl.mem_signed = True
+            elif opcode == Opcode.LHU:
+                ctrl.mem_size = 1; ctrl.mem_signed = False
+            else:  # LW
+                ctrl.mem_size = 2; ctrl.mem_signed = True
 
         # ---- Stores (S-type) ----
         elif opcode in _STORES:
             ctrl.mem_write = True
             ctrl.alu_src   = True   # endereço = rs1 + sext(off16)
+            if opcode == Opcode.SB:
+                ctrl.mem_size = 0
+            elif opcode == Opcode.SH:
+                ctrl.mem_size = 1
+            else:  # SW
+                ctrl.mem_size = 2
 
         # ---- Desvios condicionais (B-type) — comparação direta de registradores ----
         elif opcode in _BRANCHES:

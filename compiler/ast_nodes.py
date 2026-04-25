@@ -1,16 +1,16 @@
 """
-ast_nodes.py — Nós da Árvore Sintática Abstrata para o compilador EduRISC-16
+ast_nodes.py — Nós da Árvore Sintática Abstrata para o compilador EduRISC-32v2
 
-Representa expressões e statements da linguagem fonte minimalista,
-que é um subconjunto de C com:
-  - variáveis inteiras locais
-  - atribuição
-  - operações aritméticas (+, -, *, /)
+Representa expressões e statements da linguagem fonte (subconjunto de C):
+  - variáveis inteiras locais e globais
+  - atribuição simples e composta (+=, -=, *=, /=, &=, |=, ^=)
+  - operações aritméticas (+, -, *, /), bitwise (&, |, ^, ~, !)
   - comparações (==, !=, <, >, <=, >=)
   - if / else
-  - while
+  - while / for
+  - break / continue
   - return
-  - chamadas de função simples (sem parâmetros por hora)
+  - chamadas de função com argumentos
   - bloco { ... }
 """
 
@@ -35,7 +35,7 @@ class VarRef:
 
 @dataclass
 class BinOp:
-    op:    str       # '+', '-', '*', '/', '==', '!=', '<', '>', '<=', '>='
+    op:    str       # '+', '-', '*', '/', '==', '!=', '<', '>', '<=', '>=', '&', '|', '^'
     left:  "Expr"
     right: "Expr"
     line:  int
@@ -69,6 +69,7 @@ class VarDecl:
 @dataclass
 class Assign:
     name:  str
+    op:    str   # '=', '+=', '-=', '*=', '/=', '&=', '|=', '^='
     value: Expr
     line:  int
 
@@ -86,9 +87,26 @@ class WhileStmt:
     line: int
 
 @dataclass
+class ForStmt:
+    """for (init; cond; update) body"""
+    init:   Optional["Stmt"]   # VarDecl ou Assign ou None
+    cond:   Optional[Expr]     # None → loop infinito
+    update: Optional["Stmt"]   # Assign ou ExprStmt ou None
+    body:   list["Stmt"]
+    line:   int
+
+@dataclass
 class ReturnStmt:
     value: Optional[Expr]
     line:  int
+
+@dataclass
+class BreakStmt:
+    line: int
+
+@dataclass
+class ContinueStmt:
+    line: int
 
 @dataclass
 class ExprStmt:
@@ -101,12 +119,20 @@ class Block:
     line:  int
 
 
-Stmt = VarDecl | Assign | IfStmt | WhileStmt | ReturnStmt | ExprStmt | Block
+Stmt = (VarDecl | Assign | IfStmt | WhileStmt | ForStmt |
+        ReturnStmt | BreakStmt | ContinueStmt | ExprStmt | Block)
 
 
 # ---------------------------------------------------------------------------
 # Declaração de função e programa
 # ---------------------------------------------------------------------------
+
+@dataclass
+class GlobalVarDecl:
+    """Variável global declarada no escopo de arquivo."""
+    name: str
+    init: Optional[Expr]
+    line: int
 
 @dataclass
 class FuncDef:
@@ -117,4 +143,5 @@ class FuncDef:
 
 @dataclass
 class Program:
+    globals:   list[GlobalVarDecl]
     functions: list[FuncDef]
