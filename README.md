@@ -1,5 +1,7 @@
 ﻿# Plataforma Completa de Computação — Arquitetura de CPU + OS + Hypervisor
 
+# ([EM DESENVOLVIMENTO!!!])
+
 > **Repositório quádruplo:** CPU **EduRISC-32v2** em Verilog-2012 (microarquitetura com cache L1, branch prediction, MMU, interrupt controller) + **OS** (microkernel, escalonador, gerenciamento de memória, syscalls, interrupts, processos) + **Hypervisor Tipo 1** (bare-metal, 4 VMs, context switch, shadow page tables, trap delegation) + laboratório educacional **EduRISC-32v2** em Python + núcleo **RV32IMAC** em VHDL-2008.
 
 ---
