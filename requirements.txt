@@ -1,0 +1,14 @@
+# requirements.txt — Dependências Python do EduRISC-32v2 Lab
+#
+# Instale com:
+#   pip install -r requirements.txt
+#
+# Todas as dependências são da biblioteca padrão Python (stdlib) exceto as
+# listadas abaixo. O projeto requer Python >= 3.11 pelo uso de `match/case`.
+
+# ---- Nenhuma dependência externa obrigatória ----
+# O núcleo (assembler, compilador, simulador, toolchain) usa apenas stdlib.
+
+# ---- Dependências opcionais para desenvolvimento e testes ----
+pytest>=7.4          # execução de testes
+pytest-cov>=4.1      # cobertura de código

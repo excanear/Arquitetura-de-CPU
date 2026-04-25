@@ -1,0 +1,86 @@
+# =============================================================================
+# .gitignore — EduRISC-32v2 Educational CPU Project
+# =============================================================================
+
+# ---- Python cache e artefatos ----
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+*.whl
+
+# ---- Ambientes virtuais Python ----
+venv/
+.venv/
+env/
+.env/
+ENV/
+
+# ---- Saídas do assembler / linker ----
+*.hex
+*.bin
+*.obj
+*.o
+*.map
+*.lst
+*.s       # assembly gerado pelo compilador
+
+# ---- Saídas do simulador RTL (Icarus Verilog) ----
+*.vcd
+*.vvp
+sim.out
+dump.vcd
+
+# ---- Síntese FPGA (Vivado / Quartus) ----
+*.bit
+*.ltx
+*.mcs
+*.prm
+*.xpr
+*.runs/
+*.cache/
+*.ip_user_files/
+*.sim/
+*.hw/
+*.sw/
+work/
+*.log        # logs do Vivado
+*.jou        # journals do Vivado
+vivado_pid*.str
+
+# ---- Saídas de toolchain ----
+*.coe
+*.mem
+*.elf
+*.map
+
+# ---- Editores e IDEs ----
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ---- Testes e cobertura ----
+.pytest_cache/
+htmlcov/
+.coverage
+coverage.xml
+*.cover
+
+# ---- Documentação gerada ----
+docs/_build/
+site/
+
+# ---- Temporários ----
+/tmp/
+*.tmp
+*.bak

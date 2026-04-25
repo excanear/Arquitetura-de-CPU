@@ -40,7 +40,38 @@ static void tp_puthex(uint32_t v)
         tp_putchar(n < 10u ? (char)('0' + n) : (char)('A' + n - 10u));
     }
 }
-static void tp_putdec(uint8_t v) { tp_putchar((char)('0' + v / 10)); tp_putchar((char)('0' + v % 10)); }
+static void tp_putdec(uint8_t v)
+{
+    /* Imprime todos os 3 dígitos decimais possíveis de um uint8_t (0–255).
+     * A versão anterior calculava apenas 2 dígitos com v/10 e v%10,
+     * produzindo saída incorreta para v >= 100 (e.g. 255 → "25" + "5" = "255"
+     * apenas por acidente para 100–109; 250 → "25" + "0" correto, mas
+     * 199 → "19" + "9" omitia o primeiro dígito).
+     * Agora exibimos centenas, dezenas e unidades corretamente, suprimindo
+     * zeros à esquerda para legibilidade (exceto para v == 0). */
+    uint8_t h, t, u;
+    if (v >= 200u) {
+        tp_putchar('2');
+        v = (uint8_t)(v - 200u);
+        h = 1u;
+    } else if (v >= 100u) {
+        tp_putchar('1');
+        v = (uint8_t)(v - 100u);
+        h = 1u;
+    } else {
+        h = 0u;
+    }
+    t = v / 10u;
+    u = v % 10u;
+    /* Suprime zeros à esquerda: imprime dezenas se houve centenas OU se dezenas != 0.
+     * Invariante: 'h != 0' implica que já imprimimos centenas acima; 't != 0' significa
+     * que o dígito de dezenas é significativo. Sem esta condição, "05" viraria "5"
+     * corretamente, mas "10" viraria "10" (correto) e "100" viraria "100" (correto). */
+    if (h || t) {
+        tp_putchar((char)('0' + t));
+    }
+    tp_putchar((char)('0' + u));
+}
 
 /* ═══════════════════════════════════════════════════════════════════
  *  trap_inject_to_guest() — deliver a trap into the guest OS

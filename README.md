@@ -517,20 +517,56 @@ ghdl -r --std=08 cpu_top --vcd=wave.vcd
 | Vivado | 2022.2+ | Bitstream FPGA |
 | GTKWave | 3.3+ | Visualização de waveforms (opcional) |
 
+### Instalação
+
+```bash
+# Clone o repositório
+git clone https://github.com/excanear/Arquitetura-de-CPU.git
+cd Arquitetura-de-CPU
+
+# Instale dependências Python opcionais (apenas para testes)
+pip install -r requirements.txt
+```
+
 ### Demo em 3 passos
 
 ```bash
-# 1. Clone e entre na pasta
-cd "Arquitetura de CPU"
-
-# 2. Rode a demo Python integrada
+# 1. Demonstração integrada (Assembly → Simulador + C → compilador → Simulador)
 python main.py demo
-# → Resultado em R2 = 15 (esperado: 15)
-# → Assembly gerado + simulação do código compilado
+# → DEMO 1: Resultado em R2 = 15 (esperado: 15)  ✓
+# → DEMO 2: Resultado em R1 = 15 (esperado: 15)  ✓
 
-# 3. Abra a visualização web
-start web/index.html
-# → Abre o simulador interativo EduRISC-32v2 no browser
+# 2. Ou via Makefile
+make demo
+
+# 3. Abra a visualização web (no browser)
+start web/index.html   # Windows
+open  web/index.html   # macOS
+xdg-open web/index.html  # Linux
+```
+
+### Uso da toolchain
+
+```bash
+# Montar arquivo assembly
+python main.py assemble boot/bootloader.asm -o boot.hex --listing
+
+# Compilar C-like → Assembly
+python main.py compile programa.c -o prog.asm
+
+# Compilar + montar em um passo
+python main.py build programa.c -o prog.hex
+
+# Simular programa
+python main.py simulate prog.hex --trace --max-cycles 50000
+
+# Depurador interativo
+python main.py debug prog.hex
+
+# Equivalentes via Makefile
+make assemble SRC=boot/bootloader.asm
+make build    SRC=programa.c
+make simulate SRC=prog.hex
 ```
 
 ### Simulação RTL
@@ -539,12 +575,13 @@ start web/index.html
 # Montar o bootloader
 python main.py assemble boot/bootloader.asm -o boot.hex
 
-# Simular RTL
+# Simular RTL (requer Icarus Verilog)
 python main.py rtl-sim boot.hex
 
 # Verificação completa com testbench principal
-iverilog -g2012 -Irtl_v $(Get-ChildItem rtl_v -Recurse -Filter "*.v" | % FullName) verification/cpu_tb.v -o sim.out
+iverilog -g2012 -Irtl_v rtl_v/**/*.v verification/cpu_tb.v -o sim.out
 vvp sim.out
+# → "=== Results: 12/12 PASS ==="
 ```
 
 ---

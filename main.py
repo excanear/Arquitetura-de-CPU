@@ -102,7 +102,8 @@ def _print_ast(node, indent: int = 0):
 
 def _load_bin(path: str) -> list[int]:
     """Carrega arquivo binário (big-endian, 4 bytes por palavra de 32 bits)."""
-    data = open(path, "rb").read()
+    with open(path, "rb") as _f:
+        data = _f.read()
     words = []
     for i in range(0, len(data) - 3, 4):
         words.append((data[i] << 24) | (data[i+1] << 16) | (data[i+2] << 8) | data[i+3])
@@ -121,7 +122,8 @@ def cmd_assemble(args):
         print(f"[ERRO] Arquivo não encontrado: {src_path}", file=sys.stderr)
         sys.exit(1)
 
-    source = open(src_path, encoding="utf-8").read()
+    with open(src_path, encoding="utf-8") as _f:
+        source = _f.read()
 
     try:
         asm   = Assembler()
@@ -154,7 +156,8 @@ def cmd_compile(args):
         print(f"[ERRO] Arquivo não encontrado: {src_path}", file=sys.stderr)
         sys.exit(1)
 
-    source = open(src_path, encoding="utf-8").read()
+    with open(src_path, encoding="utf-8") as _f:
+        source = _f.read()
 
     if getattr(args, "show_ast", False):
         try:
@@ -172,7 +175,8 @@ def cmd_compile(args):
         sys.exit(1)
 
     out = args.output or (src_path.rsplit(".", 1)[0] + ".asm")
-    open(out, "w", encoding="utf-8").write(asm_code)
+    with open(out, "w", encoding="utf-8") as _f:
+        _f.write(asm_code)
     print(f"Assembly gerado em: {out}")
     print(asm_code)
 
@@ -190,7 +194,8 @@ def cmd_build(args):
         print(f"[ERRO] Arquivo não encontrado: {src_path}", file=sys.stderr)
         sys.exit(1)
 
-    source = open(src_path, encoding="utf-8").read()
+    with open(src_path, encoding="utf-8") as _f:
+        source = _f.read()
 
     # Etapa 1: compilar
     try:
@@ -231,9 +236,9 @@ def cmd_simulate(args):
         print(f"[ERRO] Arquivo não encontrado: {path}", file=sys.stderr)
         sys.exit(1)
 
-    # Detect format
     if path.endswith(".asm"):
-        src   = open(path, encoding="utf-8").read()
+        with open(path, encoding="utf-8") as _f:
+            src = _f.read()
         asm   = Assembler()
         words = asm.assemble(src)
     elif path.endswith(".bin"):
@@ -281,7 +286,8 @@ def cmd_debug(args):
         sys.exit(1)
 
     if path.endswith(".asm"):
-        src   = open(path, encoding="utf-8").read()
+        with open(path, encoding="utf-8") as _f:
+            src = _f.read()
         asm   = Assembler()
         words = asm.assemble(src)
         syms  = {v: k for k, v in asm._symbols.items()}
@@ -292,7 +298,7 @@ def cmd_debug(args):
         words = _load_hex(path)
         syms  = {}
 
-    sim = CPUSimulator(num_regs=32)
+    sim = CPUSimulator()
     sim.load_program(words)
     dbg = Debugger(sim, symbols=syms)
     dbg.run_interactive()
@@ -311,11 +317,12 @@ def cmd_run(args):
         print(f"[ERRO] Arquivo não encontrado: {path}", file=sys.stderr)
         sys.exit(1)
 
-    src   = open(path, encoding="utf-8").read()
+    with open(path, encoding="utf-8") as _f:
+        src = _f.read()
     asm   = Assembler()
     words = asm.assemble(src)
 
-    sim = CPUSimulator(num_regs=32)
+    sim = CPUSimulator()
     sim.load_program(words)
 
     max_cycles = args.max_cycles or 10_000
@@ -644,7 +651,7 @@ def cmd_demo(_args):
 
     try:
         words2 = asm.assemble(asm_code)
-        sim2   = CPUSimulator(num_regs=32)
+        sim2   = CPUSimulator()
         sim2.load_program(words2)
         sim2.run(max_cycles=5000)
         st2 = sim2.stats

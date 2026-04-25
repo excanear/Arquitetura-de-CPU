@@ -183,6 +183,21 @@ ZERO_REG      = 0              # R0 = hardwired 0
 SP_REG        = 30             # R30 = stack pointer
 LR_REG        = 31             # R31 = link register
 
+# ---------------------------------------------------------------------------
+# Backward-compatibility aliases (para código legado e módulos internos)
+# ---------------------------------------------------------------------------
+LINK_REG   = LR_REG      # alias histórico
+InstType   = InstFmt      # alias histórico (o enum correto é InstFmt)
+OPCODE_TYPE = OPCODE_FMT  # alias histórico
+
+# Palavra NOP codificada (opcode NOP=0x31, formato J, todos os demais bits=0)
+NOP_WORD: int = (Opcode.NOP << 26) & 0xFFFF_FFFF  # 0xC400_0000
+
+
+def encode_m(opcode: Opcode, rd: int, base: int, offset: int) -> int:
+    """Alias de encode_i para compatibilidade com código legado (M-type = I-type)."""
+    return encode_i(opcode, rd, base, offset)
+
 
 # ---------------------------------------------------------------------------
 # Helpers de sinal-extensão

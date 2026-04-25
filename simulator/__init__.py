@@ -1,5 +1,5 @@
 """
-__init__.py — Pacote simulator EduRISC-16
+__init__.py — Pacote simulator EduRISC-32v2
 """
 
 from simulator.cpu_simulator import CPUSimulator, PipelineSnapshot, SimStats
