@@ -1,4 +1,7 @@
-# Arquitetura EduRISC-16
+# Arquitetura Legada EduRISC-16
+
+> Status: legado educacional.
+> Para a trilha principal vigente, use a documentação de EduRISC-32v2 em [README.md](README.md), [docs/isa_spec.md](docs/isa_spec.md), [docs/pipeline_architecture.md](docs/pipeline_architecture.md) e [docs/memory_system.md](docs/memory_system.md).
 
 ## Visão Geral
 

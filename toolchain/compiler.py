@@ -41,14 +41,15 @@ from typing import Optional
 # ---------------------------------------------------------------------------
 # Import the core compiler from compiler/compiler.py
 # ---------------------------------------------------------------------------
-_pkg_dir = os.path.join(os.path.dirname(__file__), "..", "compiler")
-sys.path.insert(0, os.path.abspath(_pkg_dir))
+_repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if _repo_root not in sys.path:
+    sys.path.insert(0, _repo_root)
 
 try:
-    from compiler import Compiler  # compiler/compiler.py
+    from compiler.compiler import compile_source, parse_source
 except ImportError as exc:
     raise ImportError(
-        "Could not import compiler.Compiler from compiler/compiler.py. "
+        "Could not import compile_source/parse_source from compiler/compiler.py. "
         f"Original error: {exc}"
     ) from exc
 
@@ -67,7 +68,6 @@ class ToolchainCompiler:
     def __init__(self, verbose: bool = False, emit_ast: bool = False):
         self.verbose  = verbose
         self.emit_ast = emit_ast
-        self._comp    = Compiler()
 
     def compile_file(
         self,
@@ -118,7 +118,7 @@ class ToolchainCompiler:
 
         # ── Compilation: C source → assembly text ──────────────────────
         try:
-            assembly = self._comp.compile(source)
+            assembly = compile_source(source)
         except Exception as exc:  # noqa: BLE001
             result["errors"].append(f"Compiler error: {exc}")
             return result
@@ -145,14 +145,15 @@ class ToolchainCompiler:
             )
 
         # ── Optional: emit AST dump ─────────────────────────────────────
-        if self.emit_ast and hasattr(self._comp, "last_ast"):
+        if self.emit_ast:
             ast_path = os.path.splitext(asm_path)[0] + ".ast"
             try:
+                ast = parse_source(source)
                 with open(ast_path, "w", encoding="utf-8") as fh:
-                    fh.write(str(self._comp.last_ast))
+                    fh.write(str(ast))
                 if self.verbose:
                     print(f"[CC] AST written to {ast_path}")
-            except OSError:
+            except (OSError, Exception):
                 pass
 
         # ── Optional: drive the assembler stage ────────────────────────

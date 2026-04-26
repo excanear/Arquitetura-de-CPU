@@ -1,4 +1,7 @@
-# ISA EduRISC-16 — Referência Completa
+# ISA Legada EduRISC-16 — Referência Completa
+
+> Status: legado educacional.
+> A ISA principal suportada do repositório está em [docs/isa_spec.md](docs/isa_spec.md).
 
 ## Formato das Instruções
 

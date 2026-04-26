@@ -63,6 +63,17 @@ class Linker:
         """Carrega um arquivo objeto (.obj) e acumula seções/símbolos."""
         obj = json.loads(Path(path).read_text(encoding="utf-8"))
 
+        # Compatibilidade com objetos compactos emitidos por wrappers antigos:
+        # {"words": [...], "symbols": {...}}
+        if "words" in obj and "text" not in obj:
+            obj = {
+                "text": [[i, w] for i, w in enumerate(obj.get("words", []))],
+                "data": [],
+                "bss_size": 0,
+                "symbols": obj.get("symbols", {}),
+                "relocs": obj.get("relocs", []),
+            }
+
         text_offset = len(self._text)
         data_offset = len(self._data)
 

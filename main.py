@@ -458,6 +458,17 @@ def cmd_rtl_sim(args):
         print(r2.stdout)
         if r2.returncode != 0:
             print(r2.stderr)
+            sys.exit(1)
+
+        # Se o testbench publicar resumo com FAIL > 0, tratamos como erro.
+        import re
+        m = re.search(r"Resultado:\s+\d+\s+PASS\s+/\s+(\d+)\s+FAIL", r2.stdout)
+        if m and int(m.group(1)) > 0:
+            print("[rtl-sim] FALHA funcional detectada no testbench.")
+            sys.exit(1)
+
+        if m:
+            print("[rtl-sim] OK — smoke funcional do testbench passou.")
         vcd = os.path.join(_TB_DIR, "dump.vcd")
         if getattr(args, "waves", False) and os.path.exists(vcd):
             gtkwave = shutil.which("gtkwave")

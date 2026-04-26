@@ -1,10 +1,10 @@
-# EduRISC-32 — Arquitetura RTL
+# EduRISC-32v2 — Arquitetura RTL
 
 ## Visão Geral
 
-O **EduRISC-32** é um processador educacional de 32 bits implementado em Verilog-2012,
+O **EduRISC-32v2** é o processador educacional principal de 32 bits implementado em Verilog-2012,
 com pipeline de 5 estágios, detecção de hazards e forwarding completo.
-É a evolução natural do simulador Python EduRISC-16, mantendo compatibilidade de ISA.
+Ele sucede a trilha histórica EduRISC-16, mas representa a arquitetura vigente do repositório.
 
 | Propriedade | Valor |
 |---|---|

@@ -8,8 +8,7 @@ Endereço Word [25:0]     Região               Tamanho
 0x000000 – 0x03FFFF      IMEM (instrução)      256 K words = 1 MB
 0x040000 – 0x07FFFF      DMEM (dados)          256 K words = 1 MB
 0x080000 – 0x0FFFFD      Expansão futura       512 K words
-0x0FFFFE                 UART_TX (MMIO)
-0x0FFFFF                 UART_RX (MMIO)
+0x0FF00 – 0x0FFFF        Janela MMIO (UART/Timer)
 0x100000+                (não mapeado)
 ```
 
@@ -23,16 +22,16 @@ Endereço Word [25:0]     Região               Tamanho
 Offset (words)    Região
 ────────────────────────────────────────────────────────
 0x00000 – 0x003FF  OS data / globais / BSS
-0x00400 – 0x007FF  Stack do kernel (SP inicial = 0x0FFFF0)
+0x00400 – 0x007FF  Stack do kernel (SP cresce para baixo, topo em 0x0FFFF)
 0x00800 – 0x00FFF  BSS de usuário (zerado pelo bootloader)
 0x01000 – 0x01FFF  Tabela de processos (8 entradas × 16 words)
 0x02000 – 0x0EFFF  Heap (kmalloc/kfree)
-0x0F000 – 0x0FEFF  MMIO interno (periféricos)
-0x0FF00            UART_TX (write-only)
-0x0FF04            UART_RX (read-only)
-0x0FF10            TIMER_CMP (comparador de timer)
-0x0FF20            TIMER_CNT (contador de timer, read-only)
-0x0FFE0            DEBUG (escrita para stop-at simulation)
+0x0F000 – 0x0FEFF  Área de pilha inicial de boot/ISR
+0x0FF00            UART_TXDATA (write-only)
+0x0FF01            UART_RXDATA (read-only)
+0x0FF02            UART_STATUS ([0]=TX_READY, [1]=RX_READY)
+0x0FF10            TIMER_CMP_ADDR (comparador de timer)
+0x0FF11            TIMER_CNT_ADDR (contador de timer, read-only)
 0x0FFF0            TICK_COUNTER (incrementado pelo ISR de timer)
 ```
 
@@ -134,14 +133,11 @@ VA chega ao MMU
 
 | Endereço | Registrador | Acesso |
 |---|---|---|
-| 0x0FF00 | UART_TX | Escrita: envia byte |
-| 0x0FF04 | UART_RX | Leitura: recebe byte |
-| 0x0FF08 | UART_STATUS | [0]=TX_READY, [1]=RX_VALID |
-| 0x0FF10 | TIMER_CMP | Escrita: define intervalo do timer |
-| 0x0FF14 | TIMER_CNT | Leitura: contador atual |
-| 0x0FF20 | IRQ_MASK | Escrita: máscara de interrupções |
-| 0x0FF24 | IRQ_PEND | Leitura: interrupções pendentes |
-| 0x0FFE0 | SIM_DEBUG | Escrita de 0xDEAD = parar simulação |
+| 0x0FF00 | UART_TXDATA | Escrita: envia byte |
+| 0x0FF01 | UART_RXDATA | Leitura: recebe byte |
+| 0x0FF02 | UART_STATUS | [0]=TX_READY, [1]=RX_READY |
+| 0x0FF10 | TIMER_CMP_ADDR | Escrita: define intervalo do timer |
+| 0x0FF11 | TIMER_CNT_ADDR | Leitura: contador atual |
 
 ---
 

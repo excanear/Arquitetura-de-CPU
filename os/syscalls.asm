@@ -1,5 +1,11 @@
 ﻿; ===========================================================================
-; syscalls.asm - Syscalls do Micro-Kernel EduRISC-16
+; syscalls.asm - Syscalls legadas do Micro-Kernel EduRISC-16
+;
+; ATENCAO:
+; Este arquivo pertence a uma trilha historica/educacional anterior ao
+; ambiente principal EduRISC-32v2. Ele permanece no repositorio como material
+; de referencia e compatibilidade, nao como definicao oficial de syscalls do
+; kernel atual.
 ;
 ; Convencao de chamada de sistema:
 ;   1. Coloque o numero da syscall em R0

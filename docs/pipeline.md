@@ -1,4 +1,7 @@
-# Pipeline EduRISC-16 — Guia Detalhado
+# Pipeline Legado EduRISC-16 — Guia Detalhado
+
+> Status: legado educacional.
+> Para o pipeline principal vigente de EduRISC-32v2, use [docs/pipeline_architecture.md](docs/pipeline_architecture.md).
 
 ## Visão Geral dos 5 Estágios
 

@@ -4,6 +4,18 @@ Bem-vindo! Este repositório é um **laboratório completo de como um computador
 
 Não precisa saber programar para entender a ideia geral. Vamos devagar. 😊
 
+## Status das Trilhas
+
+| Trilha | Status | O que significa |
+|---|---|---|
+| EduRISC-32v2 em Python | Suportado | É a base funcional e didática principal do projeto hoje |
+| EduRISC-32v2 em Verilog | Suportado | É a linha principal de hardware do repositório |
+| OS + Hypervisor | Suportado em evolução | Faz parte da plataforma principal, mas ainda está em consolidação |
+| RV32IMAC em VHDL | Trilha paralela | É uma linha separada, mais próxima de um núcleo profissional |
+| EduRISC-16 | Legado educacional | Serve como material histórico; não define a arquitetura principal atual |
+
+Se você quiser entender a versão principal do projeto, siga primeiro a trilha EduRISC-32v2. Os materiais de EduRISC-16 ficam no repositório como referência histórica.
+
 ---
 
 ## A ideia central: como um computador "pensa"?

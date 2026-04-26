@@ -1,4 +1,7 @@
-# Assembler EduRISC-16 — Guia de Referência
+# Assembler Legado EduRISC-16 — Guia de Referência
+
+> Status: legado educacional.
+> O fluxo principal suportado do repositório é o assembler de EduRISC-32v2 descrito em [README.md](README.md) e implementado em [assembler/assembler.py](assembler/assembler.py).
 
 ## Introdução
 

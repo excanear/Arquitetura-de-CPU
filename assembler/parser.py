@@ -1,8 +1,11 @@
 """
-parser.py — Parser para o Assembly EduRISC-16
+parser.py — Parser legado para o Assembly EduRISC-16
 
 Converte a lista de Tokens em uma lista de instruções intermediárias
 (nós de AST simples) prontas para geração de código pelo assembler.
+
+Este módulo é mantido para compatibilidade com a trilha histórica EduRISC-16.
+Ele não define a arquitetura principal suportada do repositório.
 
 Gramática suportada:
 

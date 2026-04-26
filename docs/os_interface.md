@@ -18,20 +18,19 @@ A instrução SYSCALL gera exceção com CAUSE=3. O kernel lê o número de sysc
 | Num (R1) | Nome | Argumentos | Retorno (R1) |
 |---|---|---|---|
 | 0 | SYS_EXIT | R2=código de saída | — |
-| 1 | SYS_WRITE | R2=fd, R3=buf_addr, R4=len | bytes escritos |
-| 2 | SYS_READ | R2=fd, R3=buf_addr, R4=len | bytes lidos |
+| 1 | SYS_WRITE | R2=buf_addr, R3=len | quantidade escrita |
+| 2 | SYS_READ | R2=buf_addr, R3=len | quantidade lida |
 | 3 | SYS_MALLOC | R2=size (words) | ponteiro ou 0 |
 | 4 | SYS_FREE | R2=ponteiro | — |
 | 5 | SYS_YIELD | — | — |
-| 6 | SYS_SLEEP | R2=ticks | — |
-| 7 | SYS_GETPID | — | pid atual |
-| 8 | SYS_FORK | — | pid filho ou 0 |
+| 6 | SYS_GETPID | — | pid atual |
+| 7 | SYS_SLEEP | R2=ticks | — |
+| 8 | SYS_HEAPSTAT | R2=*free_blocks, R3=*used_blocks | — |
 | 9 | SYS_UPTIME | — | ticks desde boot |
 
-**Descrição dos descritores de arquivo:**
-- fd=0: stdin (UART RX)
-- fd=1: stdout (UART TX)
-- fd=2: stderr (UART TX, prefixado com "ERR: ")
+Observação:
+
+- A implementação atual em [os/syscalls.c](os/syscalls.c) trata SYS_WRITE e SYS_READ como operações diretas sobre buffer em memória e UART, sem camada de descritor de arquivo.
 
 ---
 
@@ -40,9 +39,8 @@ A instrução SYSCALL gera exceção com CAUSE=3. O kernel lê o número de sysc
 ```
   espaço usuário:
     MOVI  R1, SYS_WRITE   ; número da syscall
-    MOVI  R2, 1           ; fd=stdout
-    ADDI  R3, R0, buf     ; endereço do buffer
-    MOVI  R4, 13          ; tamanho
+    ADDI  R2, R0, buf     ; endereço do buffer
+    MOVI  R3, 13          ; tamanho
     SYSCALL               ; trap!
 
   hardware (exception_handler.v):
@@ -119,10 +117,10 @@ RET                ; PC ← R31
 ```c
 typedef struct {
     int pid;       // ID do processo (offset 0)
-    int state;     // 0=FREE 1=READY 2=RUNNING 3=BLOCKED
+  int state;     // 0=FREE 1=READY 2=RUNNING 3=BLOCKED 4=ZOMBIE
     int pc;        // PC salvo
     int sp;        // SP salvo
-    int regs[13];  // R1–R13 salvos (callee-saved + args)
+  int regs[12];  // faixa salva a partir de R1, conforme ENTRY_SIZE=16
 } ProcessEntry;    // Tamanho = 16 words
 ```
 
@@ -197,7 +195,7 @@ SW    R2, TIMER_CMP(R0) ; define período
 
 ### Porta UART
 - TX: escrever byte em MMIO[0xFF00]
-- RX: ler byte de MMIO[0xFF04]; verificar UART_STATUS[1] antes
+- RX: ler byte de MMIO[0xFF01]; verificar UART_STATUS[1] antes
 - Velocidade: configurável via parâmetro `UART_BAUD` em `fpga/top.v`
 
 ---

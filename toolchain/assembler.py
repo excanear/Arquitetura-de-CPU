@@ -35,14 +35,15 @@ from typing import Optional
 # ---------------------------------------------------------------------------
 # Re-export the core assembler from assembler/assembler.py
 # ---------------------------------------------------------------------------
-_pkg_dir = os.path.join(os.path.dirname(__file__), "..", "assembler")
-sys.path.insert(0, os.path.abspath(_pkg_dir))
+_repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if _repo_root not in sys.path:
+    sys.path.insert(0, _repo_root)
 
 try:
-    from assembler import Assembler  # assembler/assembler.py
+    from assembler.assembler import Assembler
 except ImportError as exc:
     raise ImportError(
-        "Could not import assembler.Assembler from assembler/assembler.py. "
+        "Could not import Assembler from assembler/assembler.py. "
         f"Original error: {exc}"
     ) from exc
 
@@ -106,17 +107,21 @@ class ToolchainAssembler:
             result["errors"].append(f"Assembly error: {exc}")
             return result
 
-        # assembled is expected to be a dict:
-        #   {"words": list[int], "symbols": dict, "listing": str}
-        if not isinstance(assembled, dict):
+        # O assembler principal do repositório retorna list[int]. Aceitamos
+        # também um dict por compatibilidade com wrappers experimentais.
+        if isinstance(assembled, list):
+            words = assembled
+            symbols = getattr(self._asm, "symbols", {})
+            listing = self._asm.listing(words) if self.listing else ""
+        elif isinstance(assembled, dict):
+            words = assembled.get("words", [])
+            symbols = assembled.get("symbols", {})
+            listing = assembled.get("listing", "")
+        else:
             result["errors"].append(
-                "Unexpected assembler return type: expected dict"
+                "Unexpected assembler return type: expected list or dict"
             )
             return result
-
-        words:   list  = assembled.get("words",   [])
-        symbols: dict  = assembled.get("symbols", {})
-        listing: str   = assembled.get("listing", "")
 
         result["symbols"] = symbols
         result["bytes"]   = len(words) * 4
@@ -204,8 +209,14 @@ class ToolchainAssembler:
         obj = {
             "format":  "edurisc32v2-obj-v1",
             "source":  os.path.basename(src),
+            # Formato compacto legado (compatibilidade):
             "words":   words,
+            # Formato estruturado esperado pelo linker:
+            "text":    [[i, w] for i, w in enumerate(words)],
+            "data":    [],
+            "bss_size": 0,
             "symbols": symbols,
+            "relocs":  [],
         }
         with open(path, "w", encoding="utf-8") as fh:
             json.dump(obj, fh, indent=2)

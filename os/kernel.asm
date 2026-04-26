@@ -1,5 +1,10 @@
 ; ===========================================================================
-; kernel.asm — Micro-Kernel EduRISC-16
+; kernel.asm — Micro-Kernel legado EduRISC-16
+;
+; ATENCAO:
+; Este arquivo pertence a uma trilha historica/educacional anterior ao
+; ambiente principal EduRISC-32v2. Ele permanece no repositorio como material
+; de referencia e compatibilidade, nao como definicao oficial do kernel atual.
 ;
 ; Mapa de memória:
 ;   0x000 — Vetor de boot:         JMP KERNEL_START

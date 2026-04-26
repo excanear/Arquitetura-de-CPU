@@ -1,5 +1,10 @@
 """
-__init__.py — Pacote assembler EduRISC-16
+__init__.py — Pacote assembler legado EduRISC-16
+
+Nota:
+Este pacote ainda expõe tokenizer/parser compatíveis com a trilha legada
+EduRISC-16. O assembler principal suportado do repositório segue sendo o
+Assembler de EduRISC-32v2 exposto pelo mesmo pacote.
 """
 
 from assembler.tokenizer import tokenize, Token, TokType

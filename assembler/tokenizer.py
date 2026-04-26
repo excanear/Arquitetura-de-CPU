@@ -1,7 +1,10 @@
 """
-tokenizer.py — Tokenizador para o Assembly EduRISC-16
+tokenizer.py — Tokenizador legado para o Assembly EduRISC-16
 
 Converte linhas de texto assembly em tokens estruturados.
+
+Este módulo é mantido para compatibilidade com a trilha histórica EduRISC-16.
+Ele não define a arquitetura principal suportada do repositório.
 
 Tokens produzidos:
   LABEL    — identificador seguido de ':'
