@@ -4,6 +4,21 @@
 
 > **Repositório quádruplo:** CPU **EduRISC-32v2** em Verilog-2012 (microarquitetura com cache L1, branch prediction, MMU, interrupt controller) + **OS** (microkernel, escalonador, gerenciamento de memória, syscalls, interrupts, processos) + **Hypervisor Tipo 1** (bare-metal, 4 VMs, context switch, shadow page tables, trap delegation) + laboratório educacional **EduRISC-32v2** em Python + núcleo **RV32IMAC** em VHDL-2008.
 
+## Status das Trilhas
+
+| Trilha | Status | Escopo atual |
+|---|---|---|
+| EduRISC-32v2 Python + Toolchain | Suportado | Baseline funcional do projeto; CLI, assembler, compiler, simulator, loader e testes automatizados |
+| EduRISC-32v2 RTL Verilog | Suportado | Implementação principal de hardware em Verilog-2012 |
+| OS + Hypervisor em C | Suportado em evolução | Camada de software de sistema alinhada à plataforma EduRISC-32v2 |
+| RV32IMAC em VHDL | Trilha paralela | Núcleo separado, com objetivo próprio e documentação específica |
+| Artefatos EduRISC-16 | Legado educacional | Material histórico e de referência; não definem a arquitetura principal vigente |
+
+Leitura recomendada:
+
+- Para a plataforma principal, use [README.md](README.md), [docs/isa_spec.md](docs/isa_spec.md), [docs/pipeline_architecture.md](docs/pipeline_architecture.md), [docs/memory_system.md](docs/memory_system.md) e [docs/os_interface.md](docs/os_interface.md).
+- Para material histórico, consulte os documentos explicitamente marcados como legado em [docs](docs).
+
 ---
 
 ## Índice
@@ -368,13 +383,26 @@ python main.py debug prog.hex               # inicia debugger REPL
 
 ## RV32IMAC — Núcleo VHDL-2008
 
+### Separação das trilhas de hardware
+
+O repositório possui duas linhas de hardware distintas:
+
+- **Linha principal EduRISC-32v2**: [rtl_v](rtl_v), [fpga](fpga), [boot](boot), [os](os), [hypervisor](hypervisor) e [verification](verification).
+- **Linha paralela RV32IMAC em VHDL**: [rtl](rtl) e artefatos VHDL relacionados.
+
+Importante:
+
+- O núcleo RV32IMAC não substitui implicitamente a linha EduRISC-32v2.
+- O software de sistema em [os](os) e [hypervisor](hypervisor) pertence à plataforma EduRISC-32v2.
+- O fluxo `python main.py fpga-build` usa a trilha principal em Verilog, não o núcleo RV32IMAC em VHDL.
+
 ### MMU / TLB
 
 - TLB: 32 entradas fully-associative, política FIFO
 - PTW: 2 níveis, páginas de 4 KB (VPN[31:22] + VPN[21:12])
 - Exceções: LOAD_PF, STORE_PF, IFETCH_PF
 
-### OS embutido
+### Software de sistema da plataforma EduRISC-32v2
 
 | Arquivo | Função |
 |---|---|
@@ -382,9 +410,9 @@ python main.py debug prog.hex               # inicia debugger REPL
 | `os/kernel.c` | process table, round-robin scheduler, UART I/O |
 | `os/scheduler.c` | context\_save / context\_restore / scheduler\_tick |
 | `os/memory.c` | first-fit heap: kmalloc, kfree, coalescência |
-| `os/syscalls.c` | 10 syscalls: EXIT, WRITE, READ, MALLOC, FREE, YIELD, SLEEP, GETPID, FORK, UPTIME |
+| `os/syscalls.c` | 10 syscalls: EXIT, WRITE, READ, MALLOC, FREE, YIELD, GETPID, SLEEP, HEAPSTAT, UPTIME |
 
-### FPGA
+### FPGA da plataforma EduRISC-32v2
 
 | Parâmetro | Valor |
 |---|---|
@@ -474,6 +502,13 @@ Abra `web/index.html` no navegador. Painéis:
 2. **Pipeline** — 5 estágios IF/ID/EX/MEM/WB com estado (active/stall/flush)
 3. **Registradores** — R0–R31 em grid 8 colunas
 4. **CSR** — STATUS, IVT, EPC, CAUSE, PTBR e contadores
+
+---
+
+## Licença
+
+Este projeto é distribuído sob a [MIT License](LICENSE).  
+Veja o arquivo [LICENSE](LICENSE) para os termos completos.
 5. **Cache I$** — 256 sets, hit/miss, taxa de acertos
 6. **Cache D$** — 256 sets, dirty bits, write-back
 7. **MMU / TLB** — 32 entradas, FIFO, hit/miss
