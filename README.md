@@ -1,544 +1,377 @@
-﻿# Plataforma Completa de Computação — Arquitetura de CPU + OS + Hypervisor
+<div align="center">
 
-# ([EM DESENVOLVIMENTO!!!])
+# EduRISC-32v2 · Full Computing Platform
 
-> **Repositório quádruplo:** CPU **EduRISC-32v2** em Verilog-2012 (microarquitetura com cache L1, branch prediction, MMU, interrupt controller) + **OS** (microkernel, escalonador, gerenciamento de memória, syscalls, interrupts, processos) + **Hypervisor Tipo 1** (bare-metal, 4 VMs, context switch, shadow page tables, trap delegation) + laboratório educacional **EduRISC-32v2** em Python + núcleo **RV32IMAC** em VHDL-2008.
+**Arquitetura de CPU do zero — do transistor ao hypervisor**
 
-## Status das Trilhas
+[![Tests](https://img.shields.io/badge/tests-117%20passed-brightgreen?style=flat-square)](tests/)
+[![Python](https://img.shields.io/badge/python-3.12%20%7C%203.13-blue?style=flat-square)](requirements.txt)
+[![Verilog](https://img.shields.io/badge/RTL-Verilog--2012-orange?style=flat-square)](rtl_v/)
+[![VHDL](https://img.shields.io/badge/RV32IMAC-VHDL--2008-purple?style=flat-square)](rtl/)
+[![FPGA](https://img.shields.io/badge/FPGA-Arty%20A7--35T-red?style=flat-square)](fpga/)
+[![License](https://img.shields.io/badge/license-MIT-lightgrey?style=flat-square)](LICENSE)
 
-| Trilha | Status | Escopo atual |
-|---|---|---|
-| EduRISC-32v2 Python + Toolchain | Suportado | Baseline funcional do projeto; CLI, assembler, compiler, simulator, loader e testes automatizados |
-| EduRISC-32v2 RTL Verilog | Suportado | Implementação principal de hardware em Verilog-2012 |
-| OS + Hypervisor em C | Suportado em evolução | Camada de software de sistema alinhada à plataforma EduRISC-32v2 |
-| RV32IMAC em VHDL | Trilha paralela | Núcleo separado, com objetivo próprio e documentação específica |
-| Artefatos EduRISC-16 | Legado educacional | Material histórico e de referência; não definem a arquitetura principal vigente |
-
-Leitura recomendada:
-
-- Para a plataforma principal, use [README.md](README.md), [docs/isa_spec.md](docs/isa_spec.md), [docs/pipeline_architecture.md](docs/pipeline_architecture.md), [docs/memory_system.md](docs/memory_system.md) e [docs/os_interface.md](docs/os_interface.md).
-- Para material histórico, consulte os documentos explicitamente marcados como legado em [docs](docs).
+</div>
 
 ---
 
-## Índice
+## Visão Executiva
 
-1. [Visão Geral](#visão-geral)
-2. [Estrutura de Diretórios](#estrutura-de-diretórios)
-3. [Camada 1 — CPU Architecture (RTL Verilog)](#camada-1--cpu-architecture-rtl-verilog)
-4. [Camada 2 — Operating System](#camada-2--operating-system)
-5. [Camada 3 — Hypervisor Tipo 1](#camada-3--hypervisor-tipo-1)
-6. [EduRISC-32v2 — Laboratório Python + Toolchain](#eduriscv-32v2--laboratório-python--toolchain)
-7. [RV32IMAC — Núcleo VHDL-2008](#rv32imac--núcleo-vhdl-2008)
-8. [Início Rápido](#início-rápido)
-9. [Fluxo Completo: C → CPU → FPGA](#fluxo-completo-c--cpu--fpga)
-10. [Referências](#referências)
+Este repositório implementa uma **plataforma de computação completa e autossuficiente** —
+construída integralmente do zero — com quatro camadas sobrepostas e funcionais:
 
----
+| Camada | Tecnologia | Escopo |
+|--------|-----------|--------|
+| **Hypervisor Tipo 1** | C bare-metal | 4 VMs concorrentes, shadow page tables, trap delegation |
+| **Sistema Operacional** | C (microkernel) | 8 processos, 10 syscalls, IRQ, scheduler round-robin |
+| **CPU EduRISC-32v2** | Verilog-2012 | Pipeline 5 estágios, MMU, cache L1, branch predictor |
+| **Toolchain Completa** | Python 3.12+ | Assembler, compilador C, simulador, linker, loader, debugger |
 
-## Visão Geral
-
-```
-┌──────────────────────────────────────────────────────────────────────────────────┐
-│                  Plataforma Completa de Computação  EduRISC-32v2                  │
-├─────────────────────────────────────────────────────────────────────────────────┤
-│                                                                                   │
-│  CAMADA 3 — HYPERVISOR TIPO 1 (bare-metal)                                       │
-│  hypervisor/  hv_core.c  vm_manager.c  vm_memory.c  vm_cpu.c  trap_handler.c    │
-│  • 4 VMs concorrentes  • context switch completo  • shadow page tables           │
-│  • hypercalls (SYSCALL ≥ 0x80)  • preemptive round-robin  • ERET-based dispatch │
-│                              ↑  runs inside                                       │
-├─────────────────────────────────────────────────────────────────────────────────┤
-│  CAMADA 2 — OPERATING SYSTEM (microkernel)                                       │
-│  os/  kernel.c  scheduler.c  process.c  memory.c  syscalls.c  interrupts.c      │
-│  • 8 processos  • IRQ subsystem (8 fontes)  • PCB completo  • kmalloc/kfree     │
-│  • Round-robin + context save/restore  • 10 syscalls  • process_create/exit     │
-│                              ↑  runs inside                                       │
-├─────────────────────────────────────────────────────────────────────────────────┤
-│  CAMADA 1 — CPU ARCHITECTURE (RTL + boot)                                        │
-│  rtl_v/  pipeline 5 estágios  cache L1 I$/D$  MMU+TLB  interrupt controller     │
-│  boot/   bootloader.asm + bootloader.c  (UART, timer, GPIO, flash loader)        │
-│  • 32-bit / 32 regs / 57 inst  • branch prediction (2-bit BTB 64 entradas)      │
-│  • forwarding + hazard detection  • FPGA Arty A7-35T  • 30 módulos Verilog      │
-│                              ↑  hardware                                          │
-├─────────────────────────────────────────────────────────────────────────────────┤
-│  TOOLCHAIN (Python)                                                               │
-│  toolchain/  assembler.py  compiler.py  linker.py  loader.py  debugger.py       │
-│  assembler/  compiler/  simulator/  web/  (8-panel visualizer)                   │
-│                                                                                   │
-│  VERIFICATIONN                                                                    │
-│  verification/  cpu_tb.v  pipeline_tests.v  cache_tests.v  mmu_tests.v          │
-│                 hypervisor_tests.v  (10 HV scenarios)                             │
-│                                                                                   │
-│  FPGA                                          RV32IMAC (VHDL-2008)              │
-│  fpga/  syn/  top.v  constraints.xdc           rtl/  28 unidades, GHDL PASS     │
-└──────────────────────────────────────────────────────────────────────────────────┘
-```
-
-| Camada | Conteúdo | Status |
-|---|---|---|
-| Hypervisor Tipo 1 | hv_core, vm_manager, vm_memory, vm_cpu, trap_handler | ✅ Novo |
-| Operating System | kernel, scheduler, process, memory, syscalls, interrupts | ✅ Expandido |
-| CPU Architecture | 31 módulos Verilog + branch predictor BTB | ✅ Expandido |
-| Boot | bootloader.asm + bootloader.c (UART/timer/GPIO) | ✅ Novo |
-| Toolchain | assembler + compiler + linker + loader + debugger | ✅ Completo |
-| EduRISC-32v2 Python | Simulador + web visualizer (8 painéis) | ✅ Completo |
-| RV32IMAC VHDL | 28 unidades, GHDL verified | ✅ Completo |
+O projeto inclui também um **núcleo RV32IMAC em VHDL-2008** como trilha paralela, verificado com GHDL.
 
 ---
 
-## Estrutura de Diretórios
+## Arquitetura em Camadas
 
 ```
-.
-├── rtl_v/                         ← EduRISC-32v2 RTL (Verilog-2012)
-│   ├── isa_pkg.vh                 #   Constantes de opcode e CSR
-│   ├── cpu_top.v                  #   Instância top-level + csr_regfile
-│   ├── register_file.v            #   Banco 32×32-bit, dual-read, single-write
-│   ├── program_counter.v          #   PC 26-bit com stall/load
-│   ├── pipeline_if.v              #   Estágio IF (I-cache + fetch)
-│   ├── pipeline_id.v              #   Estágio ID (decode + reg read)
-│   ├── pipeline_ex.v              #   Estágio EX (ALU + branch unit)
-│   ├── pipeline_mem.v             #   Estágio MEM (D-cache + MMU)
-│   ├── pipeline_wb.v              #   Estágio WB (write-back)
-│   ├── memory_interface.v         #   Interface barramento → cache
-│   ├── perf_counters.v            #   Contadores: ciclos, instret, miss
-│   ├── cache/
-│   │   ├── icache.v               #   I-cache 4KB direct-mapped
-│   │   ├── dcache.v               #   D-cache 4KB write-back
-│   │   └── cache_controller.v    #   Árbitro I$/D$ ↔ memória
-│   ├── mmu/
-│   │   ├── tlb.v                  #   TLB 32 entradas fully-associative FIFO
-│   │   ├── page_table.v           #   Page Table Walker 2 níveis
-│   │   └── mmu.v                  #   MMU top: TLB + PTW
-│   ├── interrupts/
-│   │   ├── interrupt_controller.v #   8 fontes vetorizadas (timer + EXT)
-│   │   └── exception_handler.v   #   CSR EPC/CAUSE/STATUS + pipeline flush
-│   ├── control/
-│   │   └── control_unit.v        #   Sinais de controle por opcode
-│   ├── hazard/
-│   │   └── hazard_unit.v         #   Load-use stall + branch flush
-│   └── execute/
-│       ├── alu.v                  #   ALU 32-bit (14 ops + flags)
-│       ├── multiplier.v           #   Multiplier 3-stage pipeline
-│       ├── divider.v              #   Divisor iterativo 32 ciclos
-│       ├── branch_unit.v         #   Branch/Jump resolver
-│       └── forwarding_unit.v     #   Forwarding EX/MEM→EX e MEM/WB→EX
-│
-├── fpga/
-│   ├── top.v                      #   Wrapper FPGA: clock 100→25MHz, LEDs
-│   ├── build.tcl                  #   Script Vivado batch (synth→route→bit)
-│   └── arty_a7.xdc               #   Constraints para Arty A7-35T
-│
-├── boot/
-│   ├── bootloader.asm            #   Bootloader ASM: init stack, CSR, BSS, IVT
-│   └── bootloader.c              #   Bootloader C: UART, timer, GPIO, flash loader
-│
-├── os/
-│   ├── kernel.c                   #   kernel_main, tabela de processos
-│   ├── scheduler.c                #   Context save/restore, round-robin
-│   ├── memory.c                   #   Heap first-fit (kmalloc/kfree)
-│   ├── syscalls.c                 #   10 syscalls (SYS_EXIT..SYS_UPTIME)
-│   ├── interrupts.c               #   IRQ registration, dispatch, pending queue
-│   └── process.c                  #   PCB management, create/exit/wait/block
-│
-├── hypervisor/
-│   ├── hypervisor.h               #   Types: vm_t, vcpu_state_t, hv_state_t
-│   ├── hv_core.c                  #   Init, main scheduling loop, panic
-│   ├── vm_manager.c               #   VM create/destroy/start/pause/schedule
-│   ├── vm_memory.c                #   Shadow page tables, GPA→HPA translation
-│   ├── vm_cpu.c                   #   vCPU save/restore, ERET trampoline
-│   └── trap_handler.c             #   Trap dispatch: timer/syscall/fault/illegal
-│
-├── verification/
-│   ├── cpu_tb.v                   #   Testbench principal (12 testes)
-│   ├── pipeline_tests.v           #   5 testes de forwarding/stalls
-│   ├── cache_tests.v              #   3 testes I$/D$
-│   ├── mmu_tests.v               #   6 testes TLB + PTW
-│   └── hypervisor_tests.v        #   10 testes HV (traps, ERET, CSRs, timer IRQ)
-│
-├── toolchain/
-│   ├── __init__.py               #   Exports: Linker, Loader, Assembler, Compiler, Debugger
-│   ├── linker.py                  #   Linker: JSON .obj → Intel HEX
-│   ├── loader.py                  #   Loader: Intel HEX → .mem/.coe/vinit
-│   ├── assembler.py               #   Assembler wrapper: .asm → .hex/.obj/.bin
-│   ├── compiler.py                #   Compiler wrapper: .c → .asm [→ .hex]
-│   └── debugger.py                #   Interactive debugger REPL + batch mode
-│
-├── cpu/
-│   └── instruction_set.py        #   ISA EduRISC-32v2: opcodes, formatos,
-│                                  #   encode/decode/disassemble
-│
-├── assembler/
-│   └── assembler.py              #   Assembler 2-passagens para EduRISC-32v2
-│
-├── compiler/
-│   └── compiler.py               #   Compilador C-like → ASM 32v2
-│
-├── simulator/                     #   Simulador Python EduRISC-32v2
-│
-├── web/
-│   ├── index.html                 #   8 painéis: Pipeline, Regs, CSR, Cache, MMU
-│   ├── styles.css                 #   Dark theme, CSS variables, responsivo
-│   └── cpu_visualization.js      #   Simulador completo 32v2 em JavaScript
-│
-├── docs/
-│   ├── isa_spec.md               #   Especificação completa da ISA (57 instrucoes)
-│   ├── pipeline_architecture.md  #   Diagrama do pipeline, forwarding, hazards
-│   ├── cache_design.md           #   Cache L1 I$/D$ 4KB, FSM, address breakdown
-│   ├── memory_system.md          #   Mapa de memória, MMU, TLB, PTW, MMIO
-│   └── os_interface.md           #   Syscalls, ABI, exceções, estados de processo
-│
-├── rtl/                           ← RV32IMAC VHDL-2008
-│   ├── cpu_top.vhd
-│   ├── fetch/, decode/, execute/  #   28 unidades de design
-│   ├── memory/, writeback/
-│   ├── cache/, csr/, mmu/
-│   └── pkg/
-│
-├── main.py                        ← CLI unificado (13 comandos)
-├── README.md
-└── LEIAME.md
+╔══════════════════════════════════════════════════════════════════════════════════╗
+║                  EduRISC-32v2  ·  Full Computing Platform                       ║
+╠══════════════════════════════════════════════════════════════════════════════════╣
+║                                                                                  ║
+║  ┌─────────────────────────────────────────────────────────────────────────┐    ║
+║  │  HYPERVISOR TIPO 1  (bare-metal, máximo privilégio)                    │    ║
+║  │   VM 0 ── VM 1 ── VM 2 ── VM 3   (preemptive round-robin)             │    ║
+║  │   shadow page tables · hypercalls (≥0x80) · ERET trampoline           │    ║
+║  │   trap delegation: TIMER / SYSCALL / PAGE_FAULT / ILLEGAL             │    ║
+║  └───────────────────────────┬─────────────────────────────────────────────┘    ║
+║                               │ executa sobre                                   ║
+║  ┌─────────────────────────────▼─────────────────────────────────────────────┐  ║
+║  │  SISTEMA OPERACIONAL  (microkernel C)                                    │  ║
+║  │   kernel_main · scheduler (round-robin) · PCB (8 processos)            │  ║
+║  │   kmalloc/kfree (first-fit) · 10 syscalls · IRQ dispatcher (8 fontes)  │  ║
+║  │   process_create/exit/wait/block · context save/restore                 │  ║
+║  └───────────────────────────┬─────────────────────────────────────────────┘  ║
+║                               │ roda em                                         ║
+║  ┌─────────────────────────────▼─────────────────────────────────────────────┐  ║
+║  │  CPU EduRISC-32v2  (RTL Verilog-2012)                                   │  ║
+║  │   5-stage pipeline · 32-bit · 57 instruções · 32 registradores          │  ║
+║  │   I$/D$ 4KB · MMU + TLB 32 entradas · branch predictor BTB 64 ent.     │  ║
+║  │   MUL 3 ciclos · DIV 32 ciclos · forwarding · hazard detection           │  ║
+║  │   FPGA: Arty A7-35T (Vivado)  ·  30+ módulos Verilog                   │  ║
+║  └─────────────────────────────────────────────────────────────────────────┘  ║
+║                                                                                  ║
+║  ┌──────────────────────────────────────────────────────────────────────────┐   ║
+║  │  TOOLCHAIN PYTHON                                                        │   ║
+║  │  Assembler · Compilador C · Simulador · Linker · Loader · Debugger      │   ║
+║  │  117 testes · CI/CD (Python 3.12 + 3.13) · Visualizador Web 8 painéis  │   ║
+║  └──────────────────────────────────────────────────────────────────────────┘   ║
+╚══════════════════════════════════════════════════════════════════════════════════╝
 ```
 
 ---
 
-## Camada 1 — CPU Architecture (RTL Verilog)
+## ISA EduRISC-32v2
 
-### ISA EduRISC-32v2
+### Parâmetros Principais
 
-- **32 bits** por instrução (6 formatos: R/I/S/B/J/U)
-- **32 registradores**: R0=zero, R30=SP, R31=LR
-- **57 instruções**: aritmética, lógica, shifts, mov, loads/stores, branches, system
-- **Espaço de endereçamento**: 26 bits → 256 MB
-- **CSRs**: STATUS, IVT, EPC, CAUSE, PTBASE, TIMECMP, IM e performance counters
+| Parâmetro | Valor |
+|-----------|-------|
+| Largura de instrução | 32 bits (fixo) |
+| Registradores | 32 × 32 bits — R0=zero, R30=SP, R31=LR |
+| Espaço de endereçamento | 26 bits → 256 MB word-addressed |
+| Total de instruções | **57** definidas (6 formatos: R / I / S / B / J / U) |
+| CSRs | 14 nomeados — STATUS, IVT, EPC, CAUSE, PTBR, TLBCTL, TIMECMP… |
+| Endianness | Big-endian |
 
-### Pipeline 5 estágios
+### Formatos de Instrução
 
 ```
-[IF]  →  [ID]  →  [EX]  →  [MEM]  →  [WB]
-
-Forwarding:      EX/MEM → EX,  MEM/WB → EX
-Hazard detection: Load-use (1 stall),  Branch taken (1 flush)
-Mul/Div:         MUL = 3 stalls,  DIV = 32 stalls (iterativo)
-Branch prediction: BTB 64 entradas, contadores 2-bit saturantes (~88%)
+ 31    26 25  21 20  16 15  11 10   6 5      0
+┌───────┬──────┬──────┬──────┬──────┬────────┐
+│op[5:0]│rd    │rs1   │rs2   │shamt │ —      │  R  (registrador)
+├───────┼──────┼──────┼───────────────────────┤
+│op[5:0]│rd    │rs1   │    imm16[15:0]        │  I  (imediato)
+├───────┼──────┼──────┼───────────────────────┤
+│op[5:0]│rs2   │rs1   │    off16[15:0]        │  S  (store)
+├───────┼──────┼──────┼───────────────────────┤
+│op[5:0]│rs1   │rs2   │    off16[15:0]        │  B  (branch)
+├───────┼─────────────────────────────────────┤
+│op[5:0]│           addr26[25:0]              │  J  (jump absoluto)
+├───────┼──────┼──────────────────────────────┤
+│op[5:0]│rd    │        imm21[20:0]           │  U  (upper immediate)
+└───────┴──────┴──────────────────────────────┘
 ```
 
-### Branch Predictor (novo)
+### Categorias de Instruções
 
-- **Bimodal predictor**: BTB direto com 64 entradas × 2-bit saturating counter
-- `rtl_v/branch_predictor.v`: prediction port (IF) + update port (EX)
-- Detecção automática de misprediction → flush sinal para pipeline
+| Categoria | Instruções | Exemplo |
+|-----------|-----------|---------|
+| Aritmética | ADD, ADDI, SUB, MUL, MULH, DIV, DIVU, REM | `ADD R3, R1, R2` |
+| Lógica | AND, OR, XOR, NOT, ANDI, ORI, XORI | `ANDI R1, R1, 0xFF` |
+| Shift | SLL, SRL, SRA, SLLI, SRLI, SRAI | `SLL R2, R1, R3` |
+| Mov | MOV, MOVI, MOVHI | `MOVHI R1, 0xDEAD` |
+| Load/Store | LW, LH, LB, LHU, LBU, SW, SH, SB | `LW R1, 8(R2)` |
+| Branch | BEQ, BNE, BLT, BGT, BLE, BGE | `BEQ R1, R2, label` |
+| Jump | JMP, CALL, RET, JALR | `CALL func` |
+| Sistema | SYSCALL, ERET, MTC, MFC, FENCE, HLT, NOP | `MTC 0, R1` |
+
+---
+
+## Pipeline — 5 Estágios
+
+```
+ ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐
+ │    IF    │  │    ID    │  │    EX    │  │   MEM    │  │    WB    │
+ │ I-Cache  │  │ Decoder  │  │   ALU    │  │ D-Cache  │  │ RegFile  │
+ │ PC + MMU │  │ RegFile  │  │ MUL/DIV  │  │ MMU/TLB  │  │ Write    │
+ │ BTB Pred │  │ Imm Gen  │  │ BranchU  │  │ LSU      │  │          │
+ └────┬─────┘  └────┬─────┘  └────┬─────┘  └────┬─────┘  └──────────┘
+      ╔═══════════════════════════════════════════════════╗
+      ║  Forwarding: EX/MEM → EX  ·  MEM/WB → EX        ║
+      ║  Hazard: load-use stall (1 ciclo)                 ║
+      ║  Branch misprediction: flush (1 ciclo)            ║
+      ╚═══════════════════════════════════════════════════╝
+```
+
+| Recurso | Detalhe |
+|---------|---------|
+| Forwarding | EX/MEM → EX e MEM/WB → EX — sem stall para RAW normais |
+| Load-use hazard | 1 ciclo de stall automático |
+| Branch predictor | BTB 64 entradas, contadores 2-bit saturantes (~88% acerto) |
+| Multiplicador | 3 estágios pipeline (3 stalls visíveis) |
+| Divisor | Iterativo, 32 ciclos (inteiro com/sem sinal) |
+| MUL High | `MULH` — 32 bits superiores do produto sinal×sinal |
+
+---
+
+## Subsistemas de Hardware
 
 ### Cache L1
 
 | | I-Cache | D-Cache |
-|---|---|---|
+|--|---------|---------|
 | Tamanho | 4 KB | 4 KB |
-| Organização | Direct-mapped, 256×4w | Direct-mapped, 256×4w |
+| Organização | Direct-mapped, 256 × 4 words | Direct-mapped, 256 × 4 words |
 | Write policy | Read-only | Write-back + Write-allocate |
+| CSR de miss | `CSR_ICMISS` | `CSR_DCMISS` |
+
+### MMU + TLB
+
+| Parâmetro | Valor |
+|-----------|-------|
+| Modelo | `_TLBModel` — 32 entradas fully-associative |
+| Substituição | LRU (Least Recently Used) |
+| Esquema | Sv32-like: VPN = VA[25:10], offset = VA[9:0] (1024 words/página) |
+| Page Table | 1 nível — `PTE = mem[PTBR + VPN]`, flags V/R/W/X bits [3:0] |
+| Ativação | `STATUS.KU=1` + `PTBR≠0` → user mode com tradução ativa |
+| Page fault | Dispara `CAUSE_PGFAULT=2` → handler via IVT |
+| TLBFLUSH | Escrita em `CSR_TLBCTL` bit 0 → flush total + auto-clear |
+| Identidade | Modo kernel (KU=0): PA = VA — sem tradução |
+
+### Controlador de Interrupções
+
+- **8 fontes vetorizadas**: Timer (IRQ 0), UART RX/TX, GPIO, SPI, I2C, DMA, EXT
+- Tabela de vetores (IVT) em `CSR_IVT` — cada entrada é uma instrução JMP de 32 bits
+- `STATUS.IE` (interrupt enable global) + máscara por fonte
+- Pipeline flush automático na entrada de qualquer exceção ou interrupção
+
+### CSRs — Control & Status Registers
+
+| Índice | Nome | Descrição |
+|--------|------|-----------|
+| 0 | `CSR_STATUS` | IE, KU, bits de modo |
+| 1 | `CSR_IVT` | Base da tabela de vetores de interrupção |
+| 2 | `CSR_EPC` | PC salvo na exceção |
+| 3 | `CSR_CAUSE` | Causa: 0=ILLEGAL, 2=PGFAULT, 3=SYSCALL… |
+| 4 | `CSR_ESCRATCH` | Scratch register para handler |
+| 5 | `CSR_PTBR` | Base da page table |
+| 6 | `CSR_TLBCTL` | TLB control — bit 0 = FLUSH |
+| 7 | `CSR_TIMECMP` | Comparador do timer (trigger IRQ 0) |
+| 8–10 | `CSR_CYCLE/H/INSTRET` | Contadores de ciclos e instruções |
+| 11–13 | `CSR_ICMISS/DCMISS/BRMISS` | Misses de I$, D$, branches |
 
 ---
 
-## Camada 2 — Operating System
+## Sistema Operacional (Microkernel C)
 
-### Arquivos
-
-| Arquivo | Responsabilidade |
-|---|---|
-| `os/kernel.c` | `kernel_main()`, tabela de processos, inicialização |
-| `os/scheduler.c` | Round-robin, context save/restore, tick handler |
-| `os/process.c` | PCB management: `process_create/exit/wait/block/unblock` (NOVO) |
-| `os/memory.c` | `kmalloc/kfree`, first-fit heap |
-| `os/syscalls.c` | 10 syscalls: write, malloc, free, yield, sleep, exit, getpid, uptime, open, close |
-| `os/interrupts.c` | IRQ registration, dispatch, pending queue, per-source masking (NOVO) |
-
-### Interrupt Subsystem (novo)
-
-```c
-interrupts_init();
-irq_register(IRQ_UART_RX, uart_rx_handler, &uart_dev);
-irq_enable(IRQ_UART_RX);
-global_irq_enable();
-// → irq_dispatch() chamado pelo IVT stub com o número da IRQ
+```
+os/
+├── kernel.c       kernel_main(), tabela de processos (MAX=8), subsistemas
+├── scheduler.c    round-robin, context save/restore, timer tick handler
+├── process.c      PCB: process_create / exit / wait / block / unblock
+├── memory.c       heap first-fit: kmalloc() / kfree()
+├── syscalls.c     10 syscalls via SYSCALL + CSR_CAUSE
+└── interrupts.c   irq_register() / irq_enable() / irq_dispatch() — 8 fontes
 ```
 
-8 fontes de interrupção: Timer (IRQ 0), UART RX/TX, GPIO, SPI, I2C, DMA, EXT.
+### Ciclo de Vida do Processo
 
-### Process Management (novo)
-
-```c
-int pid = process_create(entry_addr, priority, "my_task");
-// processo passa por: READY → RUNNING → BLOCKED → READY → ZOMBIE → FREE
-process_exit(0);
-process_wait(child_pid, &exit_code);
 ```
+process_create()
+      │
+      ▼
+  [READY] ──── scheduler tick ────► [RUNNING]
+      ▲                                   │
+      │     process_unblock()             │  process_block() / sleep()
+      │                                   ▼
+      └─────────────────────────── [BLOCKED]
+                                         │
+                               process_exit() / return
+                                         │
+                                    [ZOMBIE] ──► process_wait() ──► [FREE]
+```
+
+### Syscalls
+
+| Nº | Nome | Descrição |
+|----|------|-----------|
+| 0 | `SYS_WRITE` | Escreve na UART |
+| 1 | `SYS_MALLOC` | Aloca heap |
+| 2 | `SYS_FREE` | Libera heap |
+| 3 | `SYS_YIELD` | Cede CPU voluntariamente |
+| 4 | `SYS_SLEEP` | Dorme N ticks do timer |
+| 5 | `SYS_EXIT` | Termina processo atual |
+| 6 | `SYS_GETPID` | Retorna PID |
+| 7 | `SYS_UPTIME` | Ciclos desde boot |
+| 8 | `SYS_OPEN` | Abre descritor (stub) |
+| 9 | `SYS_CLOSE` | Fecha descritor (stub) |
 
 ---
 
-## Camada 3 — Hypervisor Tipo 1
-
-### Filosofia
+## Hypervisor Tipo 1
 
 ```
-Hardware (EduRISC-32v2 CPU)
-       ↓
-Hypervisor (privilegio máximo — "ring -1")
-   ├─ VM 0 → Guest OS A   (executa como "ring 0 restrito")
-   ├─ VM 1 → Guest OS B
-   ├─ VM 2 → Guest OS C
-   └─ VM 3 → Guest OS D
+Hardware EduRISC-32v2
+        │
+        ▼
+  ┌─────────────────────────────────────────────┐
+  │  HYPERVISOR  (máximo privilégio — ring -1)  │
+  │  ┌─────┐  ┌─────┐  ┌─────┐  ┌─────┐       │
+  │  │ VM0 │  │ VM1 │  │ VM2 │  │ VM3 │       │
+  │  │Guest│  │Guest│  │Guest│  │Guest│       │
+  │  │ OS  │  │ OS  │  │ OS  │  │ OS  │       │
+  │  └─────┘  └─────┘  └─────┘  └─────┘       │
+  │  Shadow Page Tables · vCPU State            │
+  │  Preemptive Round-Robin · ERET Trampoline   │
+  └─────────────────────────────────────────────┘
 ```
-
-### Arquivos e Responsabilidades
-
-| Arquivo | Conteúdo |
-|---|---|
-| `hypervisor/hypervisor.h` | Tipos: `vm_t`, `vcpu_state_t`, `hv_state_t`; códigos de trap; API pública |
-| `hypervisor/hv_core.c` | `hv_init()`, `hv_main()` (loop de scheduling), `hv_panic()` |
-| `hypervisor/vm_manager.c` | `vm_create/destroy/start/pause/get`, `vm_schedule_next()` |
-| `hypervisor/vm_memory.c` | Shadow page table (64 PTEs/VM), `vm_alloc_memory`, `vm_translate` |
-| `hypervisor/vm_cpu.c` | `vcpu_init/save_state/restore_state`, `vcpu_run()` (ERET trampoline) |
-| `hypervisor/trap_handler.c` | `trap_handle()` dispatcher, hypercalls (≥0x80), fault injection |
 
 ### Fluxo de Trap
 
 ```
-Guest instrução → TRAP
-   hardware: EPC ← PC; CAUSE ← cause; PC ← IVT[cause]
-   IVT stub: salva GPRs → s_scratch_regs[]
-   trap_handle(cause, epc, badvaddr)
-      ┌── TIMER      → vm_schedule_next() → hv_main() → vcpu_run(next)
-      ├── SYSCALL ≥80 → hypercall handler → vcpu_run(same)
-      ├── SYSCALL <80 → inject ao guest OS → vcpu_run(same)
-      ├── PAGE_FAULT  → resolve SPT ou inject → vcpu_run(same)
-      └── ILLEGAL     → emulate CSR / inject → vcpu_run(same)
+Guest executa instrução privilegiada ou dispara exceção
+        │
+        ▼
+  Hardware: EPC ← PC  ·  CAUSE ← cause  ·  PC ← IVT[cause]
+        │
+        ▼
+  IVT stub: salva GPRs → scratch_regs[]
+        │
+        ▼
+  trap_handle(cause, epc, badvaddr)
+   ├── TIMER      → vm_schedule_next() → vcpu_run(next_vm)
+   ├── SYSCALL≥80 → hypercall_handler  → vcpu_run(same_vm)
+   ├── SYSCALL<80 → inject ao guest OS → vcpu_run(same_vm)
+   ├── PAGE_FAULT → resolve SPT ou inject fault → vcpu_run(same_vm)
+   └── ILLEGAL    → emulate CSR / inject SIGILL → vcpu_run(same_vm)
 ```
 
-### Hypercalls disponíveis
+### Hypercalls
 
-| Nº (R1) | Nome | Descrição |
-|---|---|---|
-| `0x80` | `HV_CALL_VERSION` | R1 ← versão do HV (0x00010000) |
-| `0x81` | `HV_CALL_VM_ID` | R1 ← ID da VM atual (0-3) |
-| `0x82` | `HV_CALL_VM_CREATE` | Criar nova VM filha |
-| `0x83` | `HV_CALL_VM_YIELD` | Ceder CPU voluntariamente |
-| `0x84` | `HV_CALL_VM_EXIT` | Terminar esta VM (R2 = exit code) |
-| `0x85` | `HV_CALL_CONSOLE_PUT` | Escrever char na console do HV |
-
-### Inicialização (via bootloader.c)
-
-```c
-// Com hipervisor (CONFIG_HYPERVISOR definido):
-hv_init();
-vm_create(0, 0x10000, 0x0, "guest-os-0");
-vm_start(0);
-hv_main();   // nunca retorna — scheduling loop infinito
-```
+| R1 | Nome | Ação |
+|----|------|------|
+| `0x80` | `HV_CALL_VERSION` | Retorna versão do HV (0x00010000) |
+| `0x81` | `HV_CALL_VM_ID` | Retorna ID da VM atual (0–3) |
+| `0x82` | `HV_CALL_VM_CREATE` | Cria VM filha |
+| `0x83` | `HV_CALL_VM_YIELD` | Cede CPU ao HV scheduler |
+| `0x84` | `HV_CALL_VM_EXIT` | Termina VM (R2 = exit code) |
+| `0x85` | `HV_CALL_CONSOLE_PUT` | Escreve char na console do hypervisor |
 
 ---
 
-## EduRISC-32v2 — Laboratório Python + Toolchain
-
-### Toolchain unificada (novo/expandido)
+## Toolchain Python
 
 ```
 C source (.c)
-   ↓  toolchain/compiler.py    (wraps compiler/compiler.py + preprocessor)
+     │  compiler/compiler.py    (preprocessador, lexer, parser, codegen)
+     ▼
 assembly (.asm)
-   ↓  toolchain/assembler.py   (wraps assembler/assembler.py, 3 formats)
-Intel HEX (.hex) ou JSON obj
-   ↓  toolchain/linker.py      (links múltiplos .obj → single HEX)
-BRAM init (.mem / .coe / .vinit)
-   ↓  toolchain/loader.py      (converte para FPGA)
-CPU execution
+     │  assembler/assembler.py  (2 passagens, relocation, 3 formatos)
+     ▼
+Intel HEX / JSON obj / binário
+     │  toolchain/linker.py     (resolve símbolos externos, segmentos)
+     ▼
+.mem / .coe / vinit
+     │  toolchain/loader.py     (formatos Vivado, GHDL, simulador)
+     ▼
+CPUSimulator / FPGA
 ```
 
-Debugger interativo (novo):
-```bash
-python -m toolchain.debugger program.hex
-(dbg) r                   # load and run
-(dbg) b 0x0100            # breakpoint at 0x100
-(dbg) si 10               # step 10 instructions
-(dbg) pa                  # print all 32 registers
-(dbg) dis 0x0100 8        # disassemble 8 instructions at 0x100
-(dbg) m 0x8000 4          # dump 4 words from DMEM
-```
+### Compilador C
 
-### Comandos CLI (main.py)
+| Funcionalidade | Suporte |
+|----------------|---------|
+| Tipos | `int`, `char`, `unsigned`, ponteiros (`int *`, `void *`, `char *`) |
+| Expressões | Aritmética, lógica, bitwise, shift, comparação, cast, unário |
+| Controle | `if/else`, `while`, `for`, `break`, `return` |
+| Funções | Parâmetros tipados, `void`, forward declarations, recursão |
+| Variáveis | Globais, locais, arrays, ponteiros |
+| Strings | Literais `"..."` internados na seção de dados, null-terminated |
+| Preprocessador | `#include "file"`, `#define`, `#ifndef/#endif` guards, block comments |
+| Alvo | EduRISC-32v2 ASM — R1–R29 (pula R26=scratch, R30=SP, R31=LR) |
+
+### Simulador Python
+
+- **Pipeline completo** com registradores de pipeline explícitos IF/ID/EX/MEM/WB
+- **Forwarding** e **hazard detection** idênticos ao RTL Verilog
+- **Cache model** (`_CacheModel`): I$ e D$ com hit/miss tracking → CSRs
+- **MMU/TLB** (`_TLBModel`): 32 entradas LRU, Sv32-like, page fault via `_raise_exception`
+- **CSRs com semântica real**: ciclos, instret, miss counters, EPC/CAUSE/STATUS
+- **MUL/DIV latency**: 3 e 32 stalls respectivamente
+- **Exceções e traps**: IVT, ERET, SYSCALL, PGFAULT com handler correto
+- **`dump_state()`**: regs, flags, CSRs, I$, D$, TLB em saída consolidada
+
+### CLI Unificado (13 comandos)
 
 ```bash
-python main.py demo                         # Demo soma 1..5=15
-python main.py assemble prog.asm -o prog.hex --listing
-python main.py compile prog.c -o prog.asm
-python main.py build prog.c -o prog.hex     # compile + assemble
-python main.py simulate prog.hex --trace
-python main.py link a.obj b.obj -o out.hex
-python main.py load out.hex -o mem.coe --format coe
-python main.py fpga-build                   # gera .bit para Arty A7
-python main.py debug prog.hex               # inicia debugger REPL
+python main.py compile   examples/fibonacci.c -o fib.asm
+python main.py assemble  examples/fibonacci.asm -o fib.hex
+python main.py build     examples/fibonacci.c -o fib.hex   # compile + assemble
+python main.py simulate  fib.hex --cycles 500 --dump
+python main.py debug     fib.hex                            # REPL interativo
+python main.py link      a.obj b.obj -o out.hex
+python main.py load      out.hex -o prog.coe --format coe
+python main.py demo                                         # soma 1..5 = 15
 ```
 
 ---
 
-## RV32IMAC — Núcleo VHDL-2008
+## Suite de Testes
 
-### Separação das trilhas de hardware
-
-O repositório possui duas linhas de hardware distintas:
-
-- **Linha principal EduRISC-32v2**: [rtl_v](rtl_v), [fpga](fpga), [boot](boot), [os](os), [hypervisor](hypervisor) e [verification](verification).
-- **Linha paralela RV32IMAC em VHDL**: [rtl](rtl) e artefatos VHDL relacionados.
-
-Importante:
-
-- O núcleo RV32IMAC não substitui implicitamente a linha EduRISC-32v2.
-- O software de sistema em [os](os) e [hypervisor](hypervisor) pertence à plataforma EduRISC-32v2.
-- O fluxo `python main.py fpga-build` usa a trilha principal em Verilog, não o núcleo RV32IMAC em VHDL.
-
-### MMU / TLB
-
-- TLB: 32 entradas fully-associative, política FIFO
-- PTW: 2 níveis, páginas de 4 KB (VPN[31:22] + VPN[21:12])
-- Exceções: LOAD_PF, STORE_PF, IFETCH_PF
-
-### Software de sistema da plataforma EduRISC-32v2
-
-| Arquivo | Função |
-|---|---|
-| `boot/bootloader.asm` | Inicializa SP, CSR STATUS/IVT, BSS; salta para kernel_main |
-| `os/kernel.c` | process table, round-robin scheduler, UART I/O |
-| `os/scheduler.c` | context\_save / context\_restore / scheduler\_tick |
-| `os/memory.c` | first-fit heap: kmalloc, kfree, coalescência |
-| `os/syscalls.c` | 10 syscalls: EXIT, WRITE, READ, MALLOC, FREE, YIELD, GETPID, SLEEP, HEAPSTAT, UPTIME |
-
-### FPGA da plataforma EduRISC-32v2
-
-| Parâmetro | Valor |
-|---|---|
-| Target | Arty A7-35T (xc7a35ticsg324-1L) |
-| Clock externo | 100 MHz |
-| Clock CPU | 25 MHz |
-| Pinos | CLK=E3, RST=C2, LED[3:0]=H5/J5/T9/T10, UART\_TX=D10, UART\_RX=A9 |
-
-```bash
-python main.py fpga-build        # Gera bitstream via Vivado batch
+```
+tests/
+├── test_simulator.py          28 testes — pipeline, ISA, cache, MMU/TLB, traps
+├── test_assembler.py          Assembler 2-passagens, todos os formatos
+├── test_compiler.py           Compilador C: expressões, funções, ponteiros, strings
+├── test_toolchain.py          Integração: C → asm → hex → simulação
+├── test_cli_integration.py    CLI completo: 13 comandos
+└── test_contract_consistency.py   Consistência ISA spec ↔ implementação
 ```
 
-### Verificação
-
-```bash
-# Compilar e rodar todos os testbenches com Icarus Verilog
-iverilog -g2012 -Irtl_v rtl_v/**/*.v verification/cpu_tb.v -o cpu_tb.out
-vvp cpu_tb.out            # → "=== Results: 12/12 PASS ==="
-
-iverilog -g2012 -Irtl_v rtl_v/**/*.v verification/pipeline_tests.v -o pipe_tb.out
-vvp pipe_tb.out           # → "=== Pipeline Tests: 5/5 PASS ==="
-
-iverilog -g2012 -Irtl_v rtl_v/cache/*.v verification/cache_tests.v -o cache_tb.out
-vvp cache_tb.out          # → cache tests PASS
-
-iverilog -g2012 -Irtl_v rtl_v/mmu/*.v verification/mmu_tests.v -o mmu_tb.out
-vvp mmu_tb.out            # → mmu tests PASS
+```
+117 passed  ·  0 failed  ·  Python 3.12 + 3.13  ·  CI/CD GitHub Actions
 ```
 
----
+### Cobertura MMU/TLB
 
-## EduRISC-32v2 — Laboratório Python
-
-### Ferramentas disponíveis
-
-```bash
-# Montar arquivo .asm → Intel HEX
-python main.py assemble boot/bootloader.asm -o boot.hex --listing
-
-# Compilar C-like → Assembly
-python main.py compile programa.c -o prog.asm
-
-# Compilar + montar (pipeline completo)
-python main.py build programa.c -o prog.hex
-
-# Simular
-python main.py simulate prog.hex --trace --max-cycles 500000
-
-# Depurador interativo
-python main.py debug prog.hex
-
-# Ligar arquivos objeto
-python main.py link obj1.json obj2.json -o linked.hex
-
-# Converter HEX para formato Vivado BRAM
-python main.py load linked.hex --format coe -o prog.coe
-
-# Rodar demonstração integrada (somaSum 1..5 = 15)
-python main.py demo
-```
-
-### Assembler (`assembler/assembler.py`)
-
-- 2 passagens: varredura de labels + geração de código
-- Formatos R / I / S / B / J / U
-- Diretivas: `.org`, `.word`, `.data`, `.equ`
-- Aliases: `zero`=R0, `sp`=R30, `lr`=R31
-
-### Compilador C-like (`compiler/compiler.py`)
-
-- Lexer → Parser recursivo descendente → CodeGen
-- Suporte: `int`, `if/else`, `while`, expressões binárias (+−×÷&|^), comparações, chamadas de função
-- Usa MOVI (16-bit) / MOVHI+ORI (32-bit) para literais — sem pool de dados
-- BEQ/BNE R_cond, R0, label para condicionais
-
-### Toolchain (`toolchain/`)
-
-| Módulo | Classe | Função |
-|---|---|---|
-| `linker.py` | `Linker` | JSON .obj → Intel HEX com relocações (abs26, pc16, imm16) |
-| `loader.py` | `Loader` | Intel HEX → `.mem` (Verilog $readmemh), `.coe` (Vivado), `_init.v` |
-
-### Web Visualizer (`web/`)
-
-Abra `web/index.html` no navegador. Painéis:
-1. **Control** — botões Step/Run/Reset + editor de assembly inline
-2. **Pipeline** — 5 estágios IF/ID/EX/MEM/WB com estado (active/stall/flush)
-3. **Registradores** — R0–R31 em grid 8 colunas
-4. **CSR** — STATUS, IVT, EPC, CAUSE, PTBR e contadores
-
----
-
-## Licença
-
-Este projeto é distribuído sob a [MIT License](LICENSE).  
-Veja o arquivo [LICENSE](LICENSE) para os termos completos.
-5. **Cache I$** — 256 sets, hit/miss, taxa de acertos
-6. **Cache D$** — 256 sets, dirty bits, write-back
-7. **MMU / TLB** — 32 entradas, FIFO, hit/miss
-8. **Performance** — CYCLE, INSTRET, IPC, miss rates
-
----
-
-## RV32IMAC — Núcleo VHDL-2008
-
-Pipeline de 5 estágios para RISC-V RV32IMAC compliant:
-
-| Módulo (rtl/) | Função |
-|---|---|
-| `cpu_top.vhd` | Top-level com AXI4-Lite |
-| `fetch/fetch_stage.vhd` | I-cache + branch predictor |
-| `decode/decode_stage.vhd` | Decodificador + register file |
-| `execute/alu.vhd` | ALU + branch comparator |
-| `memory/memory_stage.vhd` | D-cache + LSU |
-| `writeback/writeback_stage.vhd` | Write-back |
-| `mmu/mmu.vhd` | Sv32 MMU + TLB |
-| `csr/csr_reg.vhd` | CSRs RISC-V (mstatus, mie, mip, …) |
-| `cache/icache.vhd` + `dcache.vhd` | Caches L1 |
-
-**Verificação:**
-```bash
-ghdl -a --std=08 rtl/*.vhd rtl/**/*.vhd
-ghdl -e --std=08 cpu_top
-ghdl -r --std=08 cpu_top --vcd=wave.vcd
-# → [TB] PASS
-```
+| Teste | Cobertura |
+|-------|-----------|
+| `test_mmu_kernel_mode_identity` | KU=0 → PA = VA, sem consulta à TLB |
+| `test_mmu_tlb_miss_then_hit` | Page walk no miss, hit no segundo acesso |
+| `test_tlb_page_fault_invalid_pte` | PTE.V=0 → page fault |
+| `test_tlb_permission_write_fault` | Página R-only → write retorna None |
+| `test_tlb_flush` | Flush invalida entradas → forçar novo miss |
+| `test_tlbflush_via_csr_write` | CSR_TLBCTL bit 0 → `tlb.flush()` + auto-clear |
 
 ---
 
@@ -546,89 +379,158 @@ ghdl -r --std=08 cpu_top --vcd=wave.vcd
 
 ### Pré-requisitos
 
-| Ferramenta | Versão mínima | Uso |
-|---|---|---|
-| Python | 3.11 | Assembler, compiler, simulator, toolchain |
-| Icarus Verilog | 11.0 | Simulação RTL |
-| GHDL | 3.0 | Simulação VHDL |
-| Vivado | 2022.2+ | Bitstream FPGA |
-| GTKWave | 3.3+ | Visualização de waveforms (opcional) |
+```bash
+pip install -r requirements.txt   # pytest, e dependências opcionais
+```
 
-### Instalação
+### Demo em 3 comandos
 
 ```bash
-# Clone o repositório
 git clone https://github.com/excanear/Arquitetura-de-CPU.git
 cd Arquitetura-de-CPU
-
-# Instale dependências Python opcionais (apenas para testes)
-pip install -r requirements.txt
-```
-
-### Demo em 3 passos
-
-```bash
-# 1. Demonstração integrada (Assembly → Simulador + C → compilador → Simulador)
 python main.py demo
-# → DEMO 1: Resultado em R2 = 15 (esperado: 15)  ✓
-# → DEMO 2: Resultado em R1 = 15 (esperado: 15)  ✓
-
-# 2. Ou via Makefile
-make demo
-
-# 3. Abra a visualização web (no browser)
-start web/index.html   # Windows
-open  web/index.html   # macOS
-xdg-open web/index.html  # Linux
 ```
 
-### Uso da toolchain
+### Fluxo completo: C → Assembly → Simulação
 
 ```bash
-# Montar arquivo assembly
-python main.py assemble boot/bootloader.asm -o boot.hex --listing
+# Escreva o programa
+echo 'int main() { int x=10; int y=32; return x+y; }' > hello.c
 
-# Compilar C-like → Assembly
-python main.py compile programa.c -o prog.asm
+# Compile
+python main.py compile hello.c -o hello.asm
 
-# Compilar + montar em um passo
-python main.py build programa.c -o prog.hex
-
-# Simular programa
-python main.py simulate prog.hex --trace --max-cycles 50000
-
-# Depurador interativo
-python main.py debug prog.hex
-
-# Equivalentes via Makefile
-make assemble SRC=boot/bootloader.asm
-make build    SRC=programa.c
-make simulate SRC=prog.hex
+# Simule (resultado em R1 = 42)
+python main.py simulate hello.asm --cycles 200 --dump
 ```
 
-### Simulação RTL
+### FPGA (Arty A7-35T)
 
 ```bash
-# Montar o bootloader
-python main.py assemble boot/bootloader.asm -o boot.hex
+vivado -mode batch -source fpga/build.tcl
+# gera: bitstream + timing report + utilization
+```
 
-# Simular RTL (requer Icarus Verilog)
-python main.py rtl-sim boot.hex
+### Verificação RTL
 
-# Verificação completa com testbench principal
-iverilog -g2012 -Irtl_v rtl_v/**/*.v verification/cpu_tb.v -o sim.out
-vvp sim.out
-# → "=== Results: 12/12 PASS ==="
+```bash
+iverilog -g2012 -Irtl_v rtl_v/**/*.v verification/cpu_tb.v -o cpu_tb.out
+vvp cpu_tb.out   # → "=== Results: 12/12 PASS ==="
 ```
 
 ---
 
-## Referências
+## Estrutura do Repositório
 
-- [RISC-V Specification v2.2](https://riscv.org/technical/specifications/)
-- Patterson & Hennessy, *Computer Organization and Design RISC-V Edition*, 2ed
-- Harris & Harris, *Digital Design and Computer Architecture: RISC-V Edition*
-- Vivado Design Suite User Guide (UG912)
-- Arty A7 Reference Manual — Digilent
-- [GHDL Documentation](https://ghdl.github.io/ghdl/)
-Desenvolvedor principal do projeto: **Escanearcpl** www.escanearcplx.com
+```
+.
+├── rtl_v/              EduRISC-32v2 RTL Verilog-2012 (30+ módulos)
+│   ├── cpu_top.v       Top-level: pipeline + CSR file + perf counters
+│   ├── pipeline_*.v    IF · ID · EX · MEM · WB
+│   ├── cache/          icache.v · dcache.v · cache_controller.v
+│   ├── mmu/            tlb.v · page_table.v · mmu.v
+│   ├── interrupts/     interrupt_controller.v · exception_handler.v
+│   └── execute/        alu.v · multiplier.v · divider.v · branch_unit.v
+│
+├── rtl/                RV32IMAC VHDL-2008 (28 unidades, GHDL verified)
+├── fpga/               Arty A7-35T: top.v · build.tcl · arty_a7.xdc
+├── syn/                Vivado · Quartus · scripts de síntese
+│
+├── os/                 Sistema Operacional (C)
+│   ├── kernel.c / kernel.asm
+│   ├── scheduler.c · process.c · memory.c
+│   └── syscalls.c / syscalls.asm · interrupts.c
+│
+├── hypervisor/         Hypervisor Tipo 1 (C)
+│   ├── hv_core.c · vm_manager.c · vm_memory.c
+│   └── vm_cpu.c · trap_handler.c · hypervisor.h
+│
+├── boot/               bootloader.asm · bootloader.c
+│
+├── assembler/          Assembler 2-passagens (Python)
+├── compiler/           Compilador C-like → ASM EduRISC-32v2 (Python)
+├── simulator/          Simulador pipeline 5 estágios + MMU + Cache (Python)
+├── toolchain/          Linker · Loader · Debugger (Python)
+├── cpu/                ISA: opcodes, encode/decode/disassemble
+│
+├── verification/       Testbenches Verilog
+│   ├── cpu_tb.v · pipeline_tests.v · cache_tests.v
+│   └── mmu_tests.v · hypervisor_tests.v
+│
+├── web/                Visualizador Web 8 painéis
+│   └── index.html · styles.css · cpu_visualization.js
+│
+├── tests/              Suite pytest (117 testes)
+│
+├── docs/               Especificações técnicas
+│   ├── isa_spec.md           57 instruções, codificação binária completa
+│   ├── pipeline_architecture.md
+│   ├── cache_design.md
+│   ├── memory_system.md      Mapa de memória, MMU, MMIO
+│   └── os_interface.md       ABI, syscalls, estados de processo
+│
+├── examples/           Programas de exemplo (.c e .asm)
+├── main.py             CLI unificado (13 comandos)
+└── requirements.txt
+```
+
+---
+
+## Mapa de Memória
+
+```
+0x00000000 – 0x0000FFFF   Código (texto)           64K words
+0x00010000 – 0x0001FFFF   Dados globais            64K words
+0x00020000 – 0x0003FFFF   Heap (kmalloc)          128K words
+0x00040000 – 0x0007FFFF   Stack (cresce ↓)        256K words
+0x00080000 – 0x000FFFFF   Espaço de usuário       512K words
+0x3FFF0000 – 0x3FFF00FF   MMIO — UART             TX=0x00, STATUS=0x02
+0x3FFF0100 – 0x3FFF01FF   MMIO — Timer            MTIME, MTIMECMP
+0x3FFF0200 – 0x3FFF02FF   MMIO — GPIO
+0x3FFF0300 – 0x3FFF03FF   MMIO — SPI
+```
+
+---
+
+## Mapa de Progresso
+
+| Componente | Status |
+|------------|--------|
+| ISA EduRISC-32v2 — 57 instruções, 6 formatos | ✅ |
+| Pipeline RTL Verilog-2012 — 30+ módulos | ✅ |
+| Branch predictor BTB 64 entradas, 2-bit saturante | ✅ |
+| Cache L1 I$/D$ 4KB direct-mapped | ✅ |
+| MMU + TLB 32 entradas LRU (RTL + simulador Python) | ✅ |
+| Controlador de interrupções 8 fontes vetorizadas | ✅ |
+| FPGA Arty A7-35T — síntese Vivado | ✅ |
+| Bootloader ASM + C (UART, timer, GPIO) | ✅ |
+| OS microkernel C — 8 processos, 10 syscalls | ✅ |
+| Hypervisor Tipo 1 — 4 VMs, shadow page tables | ✅ |
+| Toolchain Python — assembler + compilador C | ✅ |
+| Simulador pipeline + cache + MMU/TLB | ✅ |
+| Suite de testes — 117 testes, 0 falhas | ✅ |
+| CI/CD GitHub Actions — Python 3.12 + 3.13 matrix | ✅ |
+| RV32IMAC VHDL-2008 — 28 unidades, GHDL OK | ✅ |
+| Visualizador Web — 8 painéis | ✅ |
+
+---
+
+## Referências Técnicas
+
+| Documento | Conteúdo |
+|-----------|---------|
+| [docs/isa_spec.md](docs/isa_spec.md) | 57 opcodes, formatos, codificação binária completa |
+| [docs/pipeline_architecture.md](docs/pipeline_architecture.md) | Pipeline 5 estágios, forwarding, hazards, branch predictor |
+| [docs/cache_design.md](docs/cache_design.md) | Cache L1 I$/D$, FSM, endereçamento, write policies |
+| [docs/memory_system.md](docs/memory_system.md) | Mapa de memória, MMU, TLB, page table walk, MMIO |
+| [docs/os_interface.md](docs/os_interface.md) | ABI, syscalls, exceções, ciclo de vida de processos |
+| [docs/contrato_arquitetural.md](docs/contrato_arquitetural.md) | Invariantes e contratos entre camadas |
+
+---
+
+<div align="center">
+
+**EduRISC-32v2 Full Computing Platform**  
+CPU · OS · Hypervisor · Toolchain — construídos do zero.
+
+</div>
