@@ -29,6 +29,7 @@ Modelo de execução:
   - Variáveis globais e arrays: armazenados em posições fixas de memória (segmento de dados)
 """
 
+import os
 import re
 from compiler.ast_nodes import (
     Program, GlobalVarDecl, GlobalArrayDecl, FuncDef, Stmt, Expr,
@@ -36,7 +37,7 @@ from compiler.ast_nodes import (
     IfStmt, WhileStmt, ForStmt,
     ReturnStmt, BreakStmt, ContinueStmt, ExprStmt, Block,
     IntLiteral, VarRef, BinOp, UnaryOp, FuncCall,
-    ArrayRef, AddrOf, Deref,
+    ArrayRef, AddrOf, Deref, StringLit,
 )
 
 
@@ -54,27 +55,88 @@ class CompileError(Exception):
 # Pré-processador: #define NOME valor
 # ---------------------------------------------------------------------------
 
-def _preprocess(source: str) -> str:
-    """Substitui #define simples (sem macros com args) e remove linhas #include."""
-    defines: dict[str, str] = {}
+def _preprocess(source: str, base_dir: str | None = None,
+                _guard_set: set | None = None,
+                _shared_defines: dict | None = None) -> str:
+    """Substitui #define simples, resolve #include \"file\" e remove diretivas de guarda.
+
+    _shared_defines: dict compartilhado entre chamadas recursivas (#include) para que
+    defines do header fiquem visíveis no arquivo que o inclui.
+    """
+    if _guard_set is None:
+        _guard_set = set()
+    if _shared_defines is None:
+        _shared_defines = {}
+    defines = _shared_defines   # compartilhado entre todos os arquivos
     out_lines: list[str] = []
-    for line in source.splitlines():
-        stripped = line.strip()
+    skip_depth  = 0   # nesting depth de #ifndef/#ifdef blocos a ignorar
+    for raw_line in source.splitlines():
+        stripped = raw_line.strip()
+        # --- guardas de inclusão (#ifndef / #ifdef / #endif) ---
+        if stripped.startswith("#ifndef") or stripped.startswith("#ifdef"):
+            parts = stripped.split()
+            guard = parts[1] if len(parts) > 1 else ""
+            if stripped.startswith("#ifndef") and guard in _guard_set:
+                skip_depth += 1
+            # #ifdef: incluir bloco normalmente (não travamos)
+            continue
+        if stripped.startswith("#endif"):
+            if skip_depth > 0:
+                skip_depth -= 1
+            continue
+        if skip_depth > 0:
+            continue
+        # --- #define ---
         if stripped.startswith("#define"):
             parts = stripped.split(None, 2)
             if len(parts) >= 3:
-                defines[parts[1]] = parts[2].strip()
+                name_def = parts[1]
+                # Remove comentários inline do valor (/* ... */ ou //)
+                val = parts[2].strip()
+                val = re.sub(r"/\*.*?\*/", "", val).strip()
+                val = re.sub(r"//.*$", "", val).strip()
+                defines[name_def] = val
+                _guard_set.add(name_def)
             elif len(parts) == 2:
                 defines[parts[1]] = "1"
-            continue   # não inclui a linha #define no output
+                _guard_set.add(parts[1])
+            continue
+        # --- #include "file" ---
+        if stripped.startswith("#include"):
+            m_inc = re.match(r'#include\s+"([^"]+)"', stripped)
+            if m_inc and base_dir:
+                inc_path = os.path.join(base_dir, m_inc.group(1))
+                try:
+                    inc_text = open(inc_path, encoding="utf-8").read()
+                    # Passa _shared_defines para propagar defines do header ao pai
+                    inc_processed = _preprocess(inc_text, base_dir, _guard_set, defines)
+                    out_lines.append(inc_processed)
+                except FileNotFoundError:
+                    pass  # silenciosamente ignora arquivos não encontrados
+            continue
+        # --- outras diretivas ---
         if stripped.startswith("#"):
-            continue   # ignora outras diretivas (#include, etc.)
-        out_lines.append(line)
+            continue
+        out_lines.append(raw_line)
     result = "\n".join(out_lines)
-    # Aplica substituições (tokens inteiros, de mais longo para mais curto)
-    for name in sorted(defines, key=len, reverse=True):
-        result = re.sub(r"\b" + re.escape(name) + r"\b", defines[name], result)
-    return result
+    # Aplica substituições de #define apenas fora de comentários C block (/* ... */)
+    _BLOCK_CMT = re.compile(r"/\*[\s\S]*?\*/")
+    def _apply_defines(text: str, defs: dict) -> str:
+        parts: list[str] = []
+        last = 0
+        for m in _BLOCK_CMT.finditer(text):
+            seg = text[last:m.start()]
+            for nm in sorted(defs, key=len, reverse=True):
+                seg = re.sub(r"\b" + re.escape(nm) + r"\b", defs[nm], seg)
+            parts.append(seg)
+            parts.append(m.group())   # mantém comentário intacto
+            last = m.end()
+        seg = text[last:]
+        for nm in sorted(defs, key=len, reverse=True):
+            seg = re.sub(r"\b" + re.escape(nm) + r"\b", defs[nm], seg)
+        parts.append(seg)
+        return "".join(parts)
+    return _apply_defines(result, defines)
 
 
 # ---------------------------------------------------------------------------
@@ -84,8 +146,10 @@ def _preprocess(source: str) -> str:
 _LEX_SPEC = [
     ("COMMENT_LINE",  r"//[^\n]*"),
     ("COMMENT_BLOCK", r"/\*[\s\S]*?\*/"),
+    ("STRLIT",   r'"(?:[^"\\]|\\.)*"'),               # literal de string: "texto"
+    ("CHARLIT",  r"'(?:[^'\\]|\\[ntr\\0])'" ),        # literal de caractere: 'A', '\n'
     ("NUMBER",   r"\b(?:0x[0-9A-Fa-f]+|\d+)\b"),
-    ("KEYWORD",  r"\b(?:int|if|else|while|for|break|continue|return|void)\b"),
+    ("KEYWORD",  r"\b(?:int|if|else|while|for|break|continue|return|void|struct|char|unsigned)\b"),
     ("IDENT",    r"[A-Za-z_]\w*"),
     # Atribuições compostas — ANTES dos operadores simples para match ganancioso
     ("ASSIGNOP", r"\+=|-=|\*=|/=|%=|&=|\|=|\^=|<<=|>>="),
@@ -129,8 +193,18 @@ def _lex(source: str) -> list[Token]:
         if kind == "NL":
             line += 1
             continue
+        if kind == "STRLIT":
+            # Preserva a string sem aspas externas como token STRLIT
+            tokens.append(Token("STRLIT", value[1:-1], line))
+            continue
         if kind == "NUMBER":
             tokens.append(Token(kind, str(int(value, 16 if value.lower().startswith("0x") else 10)), line))
+            continue
+        if kind == "CHARLIT":
+            inner = value[1:-1]   # remove aspas simples externas
+            _esc  = {'n': 10, 't': 9, 'r': 13, '\\': 92, '0': 0}
+            val_int = _esc[inner[1]] if inner.startswith('\\') else ord(inner)
+            tokens.append(Token("NUMBER", str(val_int), line))
             continue
         tokens.append(Token(kind, value, line))
     return tokens
@@ -182,9 +256,11 @@ class _Parser:
                     is_ptr = True
                 name_tok = self._expect("IDENT")
                 if self._match("LPAREN"):
-                    # Função — volta e reprocesa
+                    # Função — volta e reprocessa
                     self._pos = saved_pos
-                    funcs.append(self._parse_func())
+                    f = self._parse_func()
+                    if f is not None:
+                        funcs.append(f)
                 elif self._match("LBRACKET"):
                     # Array global: int nome[N] [= {...}] ;
                     self._consume()
@@ -205,7 +281,9 @@ class _Parser:
                     self._expect("SEMI")
                     globs.append(GlobalVarDecl(name_tok.value, init, name_tok.line, is_ptr))
             else:
-                funcs.append(self._parse_func())
+                f = self._parse_func()
+                if f is not None:
+                    funcs.append(f)
         return Program(globs, funcs)
 
     def _parse_brace_init(self) -> list[Expr]:
@@ -218,23 +296,36 @@ class _Parser:
         self._expect("RBRACE")
         return items
 
-    def _parse_func(self) -> FuncDef:
+    def _parse_func(self) -> "FuncDef | None":
         ret_tok  = self._consume()   # int ou void
         name_tok = self._expect("IDENT")
         self._expect("LPAREN")
         params:  list[str]  = []
         is_ptrs: list[bool] = []
-        while not self._match("RPAREN"):
-            self._expect("KEYWORD", "int")
-            is_p = False
-            if self._match("OP1", "*"):
-                self._consume()
-                is_p = True
-            params.append(self._expect("IDENT").value)
-            is_ptrs.append(is_p)
-            if self._match("COMMA"):
-                self._consume()
+        # Lista de parâmetros vazia explícita: (void)
+        if self._match("KEYWORD", "void") and self._pos + 1 < len(self._toks) and \
+                self._toks[self._pos + 1].kind == "RPAREN":
+            self._consume()   # void
+        else:
+            while not self._match("RPAREN"):
+                # Aceita int, void*, char, unsigned como tipo de parâmetro
+                if self._match("KEYWORD"):
+                    self._consume()   # int/void/char/unsigned
+                is_p = False
+                while self._match("OP1", "*"):
+                    self._consume()
+                    is_p = True
+                if self._match("RPAREN"):
+                    break
+                params.append(self._expect("IDENT").value)
+                is_ptrs.append(is_p)
+                if self._match("COMMA"):
+                    self._consume()
         self._expect("RPAREN")
+        # Declaração antecipada (forward declaration): int foo(params);
+        if self._match("SEMI"):
+            self._consume()
+            return None   # ignorar — sem corpo
         body = self._parse_block()
         return FuncDef(name_tok.value, params, is_ptrs, body.stmts, name_tok.line)
 
@@ -549,6 +640,10 @@ class _Parser:
             self._consume()
             return IntLiteral(int(t.value), t.line)
 
+        if t.kind == "STRLIT":
+            self._consume()
+            return StringLit(t.value, t.line)
+
         if t.kind == "IDENT":
             self._consume()
             # chamada de função?
@@ -571,6 +666,18 @@ class _Parser:
 
         if t.kind == "LPAREN":
             self._consume()
+            # Detecta cast: (int), (int *), (void *), (char), (unsigned) etc.
+            saved_cast = self._pos
+            if self._match("KEYWORD") and self._peek().value in ("int", "void", "char", "unsigned"):
+                self._consume()   # consome tipo
+                while self._match("OP1", "*"):
+                    self._consume()  # consome *
+                if self._match("RPAREN"):
+                    self._consume()  # fecha o parêntese do cast
+                    # Apenas ignora o cast e retorna a expressão seguinte
+                    return self._parse_unary()
+                # Não era um cast — restaura
+                self._pos = saved_cast
             expr = self._parse_expr()
             self._expect("RPAREN")
             return expr
@@ -598,7 +705,7 @@ class CodeGen:
       - && e || usam short-circuit com labels.
     """
 
-    _MAX_REGS  = 25   # R1–R25 disponíveis
+    _MAX_REGS  = 29   # R1–R29 disponíveis (R30=SP, R31=LR, R0=zero hardwired)
     _FIRST_REG = 2    # alocação de locais começa em R2
     _FLAGS_TMP = 26   # R26 reservado como scratch de comparações/endereços
 
@@ -618,12 +725,19 @@ class CodeGen:
         # Arrays (locais e globais): nome → (endereço_base, tamanho)
         self._arrays:       dict[str, tuple[int, int]] = {}
         self._global_next:  int = self._GLOBAL_BASE_ADDR
+        # Tabela de strings interned: conteúdo → endereço
+        self._strings:      dict[str, int]       = {}
 
     # ---- Interface pública ------------------------------------------------
 
-    def compile(self, source: str) -> str:
-        """Recebe texto fonte, retorna string com código assembly."""
-        source  = _preprocess(source)
+    def compile(self, source: str, base_dir: str | None = None) -> str:
+        """Recebe texto fonte, retorna string com código assembly.
+
+        Args:
+            source:   Código fonte C-like.
+            base_dir: Diretório base para resolver #include "file" relativos.
+        """
+        source  = _preprocess(source, base_dir=base_dir)
         tokens  = _lex(source)
         parser  = _Parser(tokens)
         program = parser.parse_program()
@@ -637,6 +751,7 @@ class CodeGen:
         self._globals     = {}
         self._arrays      = {}
         self._global_next = self._GLOBAL_BASE_ADDR
+        self._strings     = {}
 
         # Registra variáveis e arrays globais
         for gv in prog.globals:
@@ -683,6 +798,27 @@ class CodeGen:
                     self._emit(f".word {val}  ; global {gv.name}")
 
         self._emit("")
+        # Emite strings interned na seção de dados
+        if self._strings:
+            self._emit("; --- Strings literais ---")
+            _esc_map = {'n': 10, 't': 9, 'r': 13, '\\': 92, '0': 0, '"': 34, "'": 39}
+            for raw, addr in self._strings.items():
+                # Decodifica o raw para emitir .word por caractere
+                decoded: list[int] = []
+                i = 0
+                while i < len(raw):
+                    c = raw[i]
+                    if c == '\\' and i + 1 < len(raw):
+                        decoded.append(_esc_map.get(raw[i + 1], ord(raw[i + 1])))
+                        i += 2
+                    else:
+                        decoded.append(ord(c))
+                        i += 1
+                decoded.append(0)
+                self._emit(f".org 0x{addr:06X}  ; \"{raw[:20]}{'...' if len(raw)>20 else ''}\"")
+                for ch in decoded:
+                    self._emit(f".word {ch}")
+        self._emit("")
         self._emit("; === FIM DO PROGRAMA ===")
         return "\n".join(self._lines)
 
@@ -726,29 +862,32 @@ class CodeGen:
                     r = self._gen_expr(init)
                     if r != reg:
                         self._emit(f"MOV R{reg}, R{r}  ; {name} = R{r}")
+                self._free_temps()
 
             case ArrayDecl(name=name, size=size, init=init, line=line):
                 # Aloca array em memória (segmento de dados fixo)
                 base = self._global_next
                 self._arrays[name] = (base, size)
                 self._global_next += size
-                # Emite dados do array inline (no segmento de código — só válido para programas simples)
-                # Alternativamente, inicializa via stores
                 if init:
                     for i, expr in enumerate(init):
                         r_val = self._gen_expr(expr)
                         r_adr = self._FLAGS_TMP
                         self._emit_load_imm(r_adr, base + i, f"&{name}[{i}]")
                         self._emit(f"SW   R{r_val}, 0(R{r_adr})  ; {name}[{i}] = init")
+                self._free_temps()
 
             case Assign(name=name, op=op, value=value, line=line):
                 self._gen_assign(name, op, value, line)
+                self._free_temps()
 
             case ArrayAssign(name=name, index=index, op=op, value=value, line=line):
                 self._gen_array_assign(name, index, op, value, line)
+                self._free_temps()
 
             case DerefAssign(ptr=ptr, op=op, value=value, line=line):
                 self._gen_deref_assign(ptr, op, value, line)
+                self._free_temps()
 
             case IfStmt(cond=cond, then_body=then_b, else_body=else_b):
                 self._gen_if(cond, then_b, else_b)
@@ -768,6 +907,7 @@ class CodeGen:
                     self._emit("HLT")
                 else:
                     self._emit("RET")
+                self._free_temps()
 
             case BreakStmt(line=line):
                 if not self._loop_stack:
@@ -783,6 +923,7 @@ class CodeGen:
 
             case ExprStmt(expr=expr):
                 self._gen_expr(expr)
+                self._free_temps()
 
             case Block(stmts=stmts):
                 for s in stmts:
@@ -821,8 +962,15 @@ class CodeGen:
             self._emit(f"{asm_op} R{reg}, R{reg}, R{r_val}  ; {op}")
 
     def _gen_array_assign(self, name: str, index: Expr, op: str, value: Expr, line: int):
-        """Gera atribuição a elemento de array: name[index] op= value."""
-        r_addr = self._array_elem_addr(name, index, line)
+        """Gera atribuição a elemento de array ou ponteiro: name[index] op= value."""
+        if name in self._arrays:
+            r_addr = self._array_elem_addr(name, index, line)
+        else:
+            # Ponteiro local/global: ptr[i] ≡ *(ptr + i)
+            r_ptr  = self._gen_expr(VarRef(name, line))
+            r_idx  = self._gen_expr(index)
+            r_addr = self._alloc_temp(line)
+            self._emit(f"ADD  R{r_addr}, R{r_ptr}, R{r_idx}  ; {name}+idx")
         r_val  = self._gen_expr(value)
         if op == "=":
             self._emit(f"SW R{r_val}, 0(R{r_addr})  ; {name}[...] = R{r_val}")
@@ -945,7 +1093,14 @@ class CodeGen:
                 return self._get_or_alloc_var(n, line)
 
             case ArrayRef(name=n, index=idx, line=line):
-                r_adr = self._array_elem_addr(n, idx, line)
+                if n in self._arrays:
+                    r_adr = self._array_elem_addr(n, idx, line)
+                else:
+                    # Ponteiro local/global: ptr[i] ≡ *(ptr + i)
+                    r_ptr = self._gen_expr(VarRef(n, line))
+                    r_idx = self._gen_expr(idx)
+                    r_adr = self._alloc_temp(line)
+                    self._emit(f"ADD  R{r_adr}, R{r_ptr}, R{r_idx}  ; {n}+idx")
                 r_val = self._alloc_temp(line)
                 self._emit(f"LW   R{r_val}, 0(R{r_adr})  ; {n}[...]")
                 return r_val
@@ -990,6 +1145,13 @@ class CodeGen:
                         self._emit(f"MOV R{arg_reg}, R{r}  ; arg{i+1}")
                 self._emit(f"CALL {name.upper()}")
                 return 1   # resultado em R1
+
+            case StringLit(value=sv, line=line):
+                # Aloca string na seção de dados e retorna seu endereço
+                addr = self._intern_string(sv, line)
+                r    = self._alloc_temp(line)
+                self._emit_load_imm(r, addr, f"str@{addr:#x}")
+                return r
 
             case _:
                 raise CompileError(f"Expressão não suportada: {type(expr).__name__}", 0)
@@ -1132,13 +1294,35 @@ class CodeGen:
         if self._next_reg > self._MAX_REGS:
             raise CompileError(f"Muitas variáveis locais (máx {self._MAX_REGS})", line)
         reg = self._next_reg
+        # Pula R26 (scratch reservado)
+        if reg == self._FLAGS_TMP:
+            self._next_reg += 1
+            reg = self._next_reg
         self._next_reg += 1
         self._var_reg[name] = reg
         self._emit(f"; var {name} → R{reg}")
         return reg
 
     def _alloc_temp(self, line: int) -> int:
-        return self._alloc_var(f"__tmp{self._next_reg}", line)
+        """Aloca registrador temporário. NÃO registra em _var_reg (reciclado no próximo stmt)."""
+        if self._next_reg > self._MAX_REGS:
+            raise CompileError(f"Registradores temporários esgotados (máx {self._MAX_REGS})", line)
+        reg = self._next_reg
+        # Pula R26 (scratch reservado)
+        if reg == self._FLAGS_TMP:
+            self._next_reg += 1
+            reg = self._next_reg
+        self._next_reg += 1
+        return reg
+
+    def _free_temps(self):
+        """Libera registradores temporários (não registrados em _var_reg).
+        Reseta _next_reg para logo após o último registrador de variável declarada.
+        """
+        if self._var_reg:
+            self._next_reg = max(self._var_reg.values()) + 1
+        else:
+            self._next_reg = self._FIRST_REG
 
     def _get_or_alloc_var(self, name: str, line: int) -> int:
         if name in self._var_reg:
@@ -1152,6 +1336,34 @@ class CodeGen:
         lbl = f"{prefix}_{self._label_cnt}"
         self._label_cnt += 1
         return lbl
+
+    def _intern_string(self, raw: str, line: int) -> int:
+        """Registra string literal na tabela de strings e retorna seu endereço em memória.
+
+        O conteúdo é armazenado como words de inteiros (1 char por word),
+        terminado por 0 (null terminator). As strings são alocadas consecutivamente
+        no segmento de dados a partir de _global_next.
+        """
+        if raw in self._strings:
+            return self._strings[raw]
+        # Decodifica escapes simples para gerar os bytes
+        decoded: list[int] = []
+        i = 0
+        while i < len(raw):
+            c = raw[i]
+            if c == '\\' and i + 1 < len(raw):
+                esc = raw[i + 1]
+                decoded.append({'n': 10, 't': 9, 'r': 13, '\\': 92, '0': 0,
+                                 '"': 34, "'": 39}.get(esc, ord(esc)))
+                i += 2
+            else:
+                decoded.append(ord(c))
+                i += 1
+        decoded.append(0)   # null terminator
+        addr = self._global_next
+        self._global_next += len(decoded)
+        self._strings[raw] = addr
+        return addr
 
 
 # ---------------------------------------------------------------------------

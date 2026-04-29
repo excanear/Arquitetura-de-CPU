@@ -184,6 +184,48 @@ SP_REG        = 30             # R30 = stack pointer
 LR_REG        = 31             # R31 = link register
 
 # ---------------------------------------------------------------------------
+# Índices dos CSRs (Control and Status Registers)
+# Conforme docs/isa_spec.md — tabela "Registradores de Controle (CSR)"
+# ---------------------------------------------------------------------------
+CSR_STATUS  = 0    # [0]=IE, [1]=KU, [7:4]=IM[3:0]
+CSR_IVT     = 1    # [25:0] = base da tabela de vetores de exceção
+CSR_EPC     = 2    # PC ao momento da exceção
+CSR_CAUSE   = 3    # [31]=irq, [3:0]=código da causa
+CSR_ESCRATCH= 4    # scratch de exceção (uso do kernel)
+CSR_PTBR    = 5    # Page Table Base Register
+CSR_TLBCTL  = 6    # TLB control (flush bits)
+CSR_CYCLE   = 7    # contador de ciclos — 32 bits baixos
+CSR_CYCLEH  = 8    # contador de ciclos — 32 bits altos
+CSR_INSTRET = 9    # instruções aposentadas (retired)
+CSR_ICOUNT  = 10   # ciclos com stall
+CSR_DCMISS  = 11   # faltas no D-cache
+CSR_ICMISS  = 12   # faltas no I-cache
+CSR_BRMISS  = 13   # predições erradas de desvio
+NUM_CSRS    = 32   # total de CSRs no banco
+
+# ---------------------------------------------------------------------------
+# Bits do CSR_STATUS
+# ---------------------------------------------------------------------------
+STATUS_IE   = (1 << 0)  # Interrupt Enable
+STATUS_KU   = (1 << 1)  # Kernel(0)/User(1) mode
+STATUS_IM0  = (1 << 4)  # Interrupt Mask bit 0 (timer)
+STATUS_IM1  = (1 << 5)  # Interrupt Mask bit 1 (UART)
+STATUS_IM2  = (1 << 6)  # Interrupt Mask bit 2 (externo)
+STATUS_IM3  = (1 << 7)  # Interrupt Mask bit 3 (externo)
+
+# ---------------------------------------------------------------------------
+# Códigos de causa de exceção (campo [3:0] do CSR_CAUSE)
+# ---------------------------------------------------------------------------
+CAUSE_ILLEGAL  = 0   # instrução ilegal
+CAUSE_ALIGN    = 1   # acesso não alinhado
+CAUSE_PGFAULT  = 2   # page fault
+CAUSE_SYSCALL  = 3   # SYSCALL
+CAUSE_BREAK    = 4   # BREAK
+CAUSE_TIMER    = 5   # timer IRQ  (CAUSE[31]=1)
+CAUSE_UART     = 6   # UART IRQ   (CAUSE[31]=1)
+CAUSE_IRQ_FLAG = (1 << 31)  # bit que distingue IRQ de exceção síncrona
+
+# ---------------------------------------------------------------------------
 # Backward-compatibility aliases (para código legado e módulos internos)
 # ---------------------------------------------------------------------------
 LINK_REG   = LR_REG      # alias histórico

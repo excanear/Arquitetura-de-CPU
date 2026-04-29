@@ -1,209 +1,505 @@
-; ===========================================================================
-; kernel.asm — Micro-Kernel legado EduRISC-16
+; =============================================================================
+; kernel.asm — Micro-Kernel EduRISC-32v2
 ;
-; ATENCAO:
-; Este arquivo pertence a uma trilha historica/educacional anterior ao
-; ambiente principal EduRISC-32v2. Ele permanece no repositorio como material
-; de referencia e compatibilidade, nao como definicao oficial do kernel atual.
+; Kernel mínimo para o processador EduRISC-32v2.
+; ISA: 32 bits, 32 registradores, instruções de largura fixa de 32 bits.
 ;
-; Mapa de memória:
-;   0x000 — Vetor de boot:         JMP KERNEL_START
-;   0x001 — Vetor de interrupção:  JMP KERNEL_START (placeholder)
-;   0x002–0x009 — Tabela de constantes do kernel (8 words)
-;   0x010 — Início do código do kernel
-;   0x100 — Base do espaço de usuário (destino do loader)
-;   0x200 — Programa demo raw (copiado pelo loader para 0x100)
+; Responsabilidades:
+;   - IVT (Interrupt/Exception Vector Table) em 0x000–0x00F
+;   - Inicialização do sistema (stack, CSRs, timer, tabela de processos)
+;   - Dispatcher de syscalls via vetor IVT[3]
+;   - Round-robin de processos (scheduler simples)
+;   - Drivers básicos: UART, timer
 ;
-; Mapa de registradores do kernel:
-;   R0  — Temporário / retorno de syscall
-;   R1  — Argumento 1 de syscall
-;   R2  — Argumento 2 de syscall
-;   R3  — Temporário interno
-;   R13 — Zero base (= 0 sempre; acessa tabela de constantes via [R13+N])
-;   R14 — Stack pointer (cresce para baixo a partir de 0x0FFF)
-;   R15 — Link register (endereço de retorno após CALL)
+; Mapa de memória (espaço unificado de instruções + dados):
+;   0x000000 – 0x00000F  IVT (16 words — vetores JMP para handlers)
+;   0x000010 – 0x0000FF  Código do kernel
+;   0x001000 – 0x001FFF  Tabela de processos (8 × 16 words)
+;   0x002000 – 0x00EFFF  Heap gerenciado pelo kernel
+;   0x00F000 – 0x00FEFF  Pilha do kernel (cresce para baixo)
+;   0x00FF00 – 0x00FFFF  MMIO (UART, Timer, GPIO)
 ;
-; Tabela de constantes (indexada por [R13+N], R13=0):
-;   [R13+2] = 0x0FFF — valor inicial do stack pointer
-;   [R13+3] = 0x00ED — número mágico de boot (banner)
-;   [R13+4] = 0x0001 — número da syscall SYS_PRINT
-;   [R13+5] = 0x0100 — DST_BASE (destino do loader)
-;   [R13+6] = 0x0200 — SRC_BASE (fonte do loader)
-;   [R13+7] = 0x0010 — N padrão (palavras a copiar = 16)
-;   [R13+8]  = 0x0001 — constante 1
-;   [R13+9]  = 0xFFFF — constante 0xFFFF / -1
-;   [R13+10] = 0x0002 — número da syscall SYS_ALLOC
-;   [R13+11] = 0x0003 — número da syscall SYS_COPY
-;   [R13+12] = 0x0004 — número da syscall SYS_MEMSET
-;   [R13+13] = 0x0080 — endereço de HEAP_PTR_VAR (em syscalls.asm)
-;   [R13+14] = 0x0E00 — limite superior do heap
+; Convenção de registradores (EduRISC-32v2):
+;   R0       — zero hardwired (leituras retornam 0, escritas ignoradas)
+;   R1       — valor de retorno de função / argumento 1 de syscall
+;   R2–R3    — argumentos 2–3 de syscall
+;   R4–R25   — uso geral (callee-saved em chamadas de kernel)
+;   R26–R29  — temporários (caller-saved)
+;   R30      — SP (stack pointer, cresce para baixo)
+;   R31      — LR (link register)
 ;
-; Syscalls (número em R0 antes de CALL SYS_DISPATCH):
-;   0 — SYS_HALT  : para a CPU
-;   1 — SYS_PRINT : o simulador captura R1 e exibe antes de parar
-; ===========================================================================
+; CSRs utilizados:
+;   CSR[0] STATUS   — [0]=IE (interrupt enable), [1]=KU (1=user mode), [7:4]=IM
+;   CSR[1] IVT      — [25:0] base da tabela de vetores de exceção
+;   CSR[2] EPC      — PC salvo automaticamente na exceção
+;   CSR[3] CAUSE    — [31]=IRQ, [3:0]=código da causa
+;   CSR[4] ESCRATCH — scratch do kernel para handlers
+;   CSR[7] CYCLE    — contador de ciclos (bits baixos)
+;   CSR[9] INSTRET  — instruções aposentadas
+;
+; Syscalls (número em R1 antes de SYSCALL):
+;   0  SYS_EXIT    — encerra processo corrente
+;   1  SYS_WRITE   — escreve char em UART  (R2=char)
+;   2  SYS_READ    — le char da UART       (retorna em R1)
+;   3  SYS_MALLOC  — aloca N words         (R2=N, retorna ponteiro em R1)
+;   4  SYS_FREE    — libera bloco          (R2=ponteiro)
+;   5  SYS_YIELD   — cede CPU
+;   6  SYS_GETPID  — retorna PID em R1
+; =============================================================================
 
-        .ORG 0x000
+; ---------------------------------------------------------------------------
+; Constantes internas (definidas com .equ para uso em todo o arquivo)
+; ---------------------------------------------------------------------------
+.equ PROC_TABLE,    0x1000
+.equ HEAP_BASE,     0x2000
+.equ HEAP_END,      0xF000
+.equ STACK_INIT,    0xFEFF
+.equ MAX_PROCS,     8
+.equ ENTRY_SIZE,    16
+.equ UART_TXDATA,   0xFF00
+.equ UART_STATUS,   0xFF02
+.equ UART_TX_READY, 0x1
+.equ TIMER_CMP,     0xFF10
+.equ TIMER_QUANTUM, 10000
+.equ PROC_FREE,     0
+.equ PROC_READY,    1
+.equ PROC_RUNNING,  2
+.equ PROC_BLOCKED,  3
+.equ FIELD_PID,     0
+.equ FIELD_STATE,   1
+.equ FIELD_PC,      2
+.equ FIELD_SP,      3
+.equ FIELD_R1,      4
+.equ CSR_STATUS,    0
+.equ CSR_IVT,       1
+.equ CSR_EPC,       2
+.equ CSR_CAUSE,     3
+.equ CSR_ESCRATCH,  4
+.equ HEAP_PTR_ADDR, 0x1FFC
+.equ CURRENT_PID_ADDR, 0x0FF0
 
-; ---- Vetor de boot ----
-BOOT:   JMP  KERNEL_START      ; 0x000 — sempre o primeiro endereço executado
+; =============================================================================
+; SECAO 0: IVT — Interrupt/Exception Vector Table
+; Cada entry e um JMP para o handler correspondente.
+; O hardware salta para IVT[CAUSE] ao receber uma excecao.
+; =============================================================================
 
-; ---- Vetor de interrupção (placeholder) ----
-        JMP  KERNEL_START      ; 0x001 — IRQ não implementado nesta versão
+        .org 0x000
 
-; ===========================================================================
-; TABELA DE CONSTANTES DO KERNEL
-; Acessível via LOAD Rd, [R13+N] onde R13 = 0 permanentemente.
-; Offsets N em 2–9 garantem campo de 4 bits (máx 15) do formato M-type.
-; ===========================================================================
+IVT_ILLEGAL:    JMP  exc_illegal
+IVT_ALIGN:      JMP  exc_align
+IVT_PGFAULT:    JMP  exc_page_fault
+IVT_SYSCALL:    JMP  exc_syscall
+IVT_BREAK:      JMP  exc_breakpoint
+IVT_TIMER:      JMP  irq_timer
+IVT_UART:       JMP  irq_uart
+IVT_RES7:       JMP  exc_reserved
+IVT_RES8:       JMP  exc_reserved
+IVT_RES9:       JMP  exc_reserved
+IVT_RES10:      JMP  exc_reserved
+IVT_RES11:      JMP  exc_reserved
+IVT_RES12:      JMP  exc_reserved
+IVT_RES13:      JMP  exc_reserved
+IVT_RES14:      JMP  exc_reserved
+IVT_RES15:      JMP  exc_reserved
 
-        .ORG 0x002
+; =============================================================================
+; SECAO 1: KERNEL_START — ponto de entrada principal
+; =============================================================================
 
-CONST_SP_INIT:   .WORD 0x0FFF   ; [R13+2] valor inicial do stack pointer
-CONST_BANNER:    .WORD 0x00ED   ; [R13+3] número mágico de boot
-CONST_SYS_PRINT: .WORD 0x0001   ; [R13+4] número da syscall SYS_PRINT
-CONST_DST_BASE:  .WORD 0x0100   ; [R13+5] endereço destino do loader
-CONST_SRC_BASE:  .WORD 0x0200   ; [R13+6] endereço fonte do loader
-CONST_N:         .WORD 0x0010   ; [R13+7] número de palavras a copiar (16)
-CONST_ONE:       .WORD 0x0001   ; [R13+8]  constante 1
-CONST_NEG1:      .WORD 0xFFFF   ; [R13+9]  constante 0xFFFF / -1
-CONST_TWO:       .WORD 0x0002   ; [R13+10] número syscall SYS_ALLOC
-CONST_THREE:     .WORD 0x0003   ; [R13+11] número syscall SYS_COPY
-CONST_FOUR:      .WORD 0x0004   ; [R13+12] número syscall SYS_MEMSET
-CONST_HEAP_PTR:  .WORD 0x0080   ; [R13+13] endereço de HEAP_PTR_VAR
-CONST_HEAP_LIM:  .WORD 0x0E00   ; [R13+14] limite superior do heap
-
-; ===========================================================================
-; KERNEL_START — inicialização do sistema
-; ===========================================================================
-
-        .ORG 0x010
+        .org 0x010
 
 KERNEL_START:
-        ; R13 = 0 permanente (zero base para acesso à tabela de constantes)
-        XOR   R13, R13, R13
+        MOVI  R30, STACK_INIT
+        MOVI  R4, 0
+        MTC   R4, CSR_IVT
+        MOVI  R4, 0x11
+        MTC   R4, CSR_STATUS
+        MOVI  R4, TIMER_QUANTUM
+        MOVI  R5, TIMER_CMP
+        SW    R4, R5, 0
+        MOVI  R10, 0
+init_proc_loop:
+        MOVI  R11, MAX_PROCS
+        BEQ   R10, R11, init_proc_done
+        MOVI  R12, ENTRY_SIZE
+        MUL   R13, R10, R12
+        MOVI  R14, PROC_TABLE
+        ADD   R13, R13, R14
+        SW    R0, R13, FIELD_PID
+        SW    R0, R13, FIELD_STATE
+        SW    R0, R13, FIELD_PC
+        SW    R0, R13, FIELD_SP
+        ADDI  R10, R10, 1
+        JMP   init_proc_loop
+init_proc_done:
+        MOVI  R1, msg_boot
+        CALL  uart_puts
+        MOVI  R1, idle_process
+        CALL  proc_create
+        MOVI  R1, demo_process
+        CALL  proc_create
+        JMP   scheduler_run
 
-        ; R14 = stack pointer inicial (0x0FFF)
-        LOAD  R14, [R13+2]     ; R14 = CONST_SP_INIT = 0x0FFF
-
-        ; Limpa registradores de usuário R0–R6
-        XOR   R0,  R0,  R0
-        XOR   R1,  R1,  R1
-        XOR   R2,  R2,  R2
-        XOR   R3,  R3,  R3
-        XOR   R4,  R4,  R4
-        XOR   R5,  R5,  R5
-        XOR   R6,  R6,  R6
-
-        ; Copia programa de usuário de SRC_BASE para DST_BASE
-        CALL  LOADER
-
-        ; Salta para início do espaço de usuário
-        JMP   0x100
-
-; ===========================================================================
-; LOADER
-; Copia N palavras de endereço SRC para endereço DST
-;   SRC = 0x200, DST = 0x100, N = tamanho em 0x1FF
-; ===========================================================================
-
-LOADER:
-        LOAD  R3, [R13+5]      ; R3 = DST_BASE = 0x0100
-        LOAD  R4, [R13+6]      ; R4 = SRC_BASE = 0x0200
-        LOAD  R5, [R13+7]      ; R5 = N = 16
-        LOAD  R6, [R13+8]      ; R6 = 1 (incremento)
-
-LOADER_LOOP:
-        ; Testa R5 == 0: ADD R0,R5,R13 → R0=R5; Z flag ligado se R5==0
-        ADD   R0, R5, R13      ; R0 = R5 + 0; flags refletem R5
-        JZ    LOADER_DONE
-
-        ; R7 = mem[R4] — lê palavra fonte
-        LOAD  R7, [R4+0]
-
-        ; mem[R3] = R7 — escreve no destino
-        STORE R7, [R3+0]
-
-        ; R4++, R3++, R5--
-        ADD   R4, R4, R6
-        ADD   R3, R3, R6
-        SUB   R5, R5, R6
-
-        JMP   LOADER_LOOP
-
-LOADER_DONE:
+; =============================================================================
+; proc_create — cria processo
+; Entrada: R1 = entry_point
+; Saida:   R1 = pid ou 0xFFFFFFFF
+; =============================================================================
+proc_create:
+        MOVI  R2, 0
+        MOVI  R3, MAX_PROCS
+proc_create_loop:
+        BEQ   R2, R3, proc_create_fail
+        MOVI  R4, ENTRY_SIZE
+        MUL   R5, R2, R4
+        MOVI  R4, PROC_TABLE
+        ADD   R5, R5, R4
+        LW    R4, R5, FIELD_STATE
+        BNE   R4, R0, proc_create_next
+        SW    R2, R5, FIELD_PID
+        MOVI  R4, PROC_READY
+        SW    R4, R5, FIELD_STATE
+        SW    R1, R5, FIELD_PC
+        MOVI  R4, STACK_INIT
+        MOVI  R26, 256
+        MUL   R26, R2, R26
+        SUB   R4, R4, R26
+        SW    R4, R5, FIELD_SP
+        MOV   R1, R2
+        RET
+proc_create_next:
+        ADDI  R2, R2, 1
+        JMP   proc_create_loop
+proc_create_fail:
+        MOVI  R1, 0xFFFFFFFF
         RET
 
-; ===========================================================================
-; SYS_DISPATCH — despacha syscall pelo número em R0
-; ===========================================================================
+; =============================================================================
+; scheduler_run — dispatcher round-robin
+; =============================================================================
+scheduler_run:
+        MOVI  R10, CURRENT_PID_ADDR
+        LW    R10, R10, 0
+        ADDI  R10, R10, 1
+        MOVI  R11, MAX_PROCS
+sched_wrap:
+        BLT   R10, R11, sched_find
+        MOVI  R10, 0
+sched_find:
+        MOVI  R12, ENTRY_SIZE
+        MUL   R13, R10, R12
+        MOVI  R12, PROC_TABLE
+        ADD   R13, R13, R12
+        LW    R14, R13, FIELD_STATE
+        MOVI  R12, PROC_READY
+        BEQ   R14, R12, sched_dispatch
+        ADDI  R10, R10, 1
+        JMP   sched_wrap
+sched_dispatch:
+        MOVI  R14, PROC_RUNNING
+        SW    R14, R13, FIELD_STATE
+        MOVI  R14, CURRENT_PID_ADDR
+        SW    R10, R14, 0
+        LW    R30, R13, FIELD_SP
+        LW    R26, R13, FIELD_PC
+        MTC   R26, CSR_EPC
+        MOVI  R26, 0x13
+        MTC   R26, CSR_STATUS
+        ERET
 
-SYS_DISPATCH:
-        ; Testa R0 == 0 → SYS_HALT
-        ; ADD Rd,Rs,R13 copia Rs e seta Z se Rs==0 (R13=0 permanente)
-        ADD   R3, R0, R13      ; R3 = R0; Z se R0 == 0
-        JZ    SYS_HALT
+; =============================================================================
+; exc_syscall — handler de SYSCALL (IVT[3])
+; =============================================================================
+exc_syscall:
+        PUSH  R26
+        PUSH  R27
+        PUSH  R28
+        MOVI  R26, 0
+        BEQ   R1, R26, syscall_exit
+        MOVI  R26, 1
+        BEQ   R1, R26, syscall_write
+        MOVI  R26, 2
+        BEQ   R1, R26, syscall_read
+        MOVI  R26, 3
+        BEQ   R1, R26, syscall_malloc
+        MOVI  R26, 4
+        BEQ   R1, R26, syscall_free
+        MOVI  R26, 5
+        BEQ   R1, R26, syscall_yield
+        MOVI  R26, 6
+        BEQ   R1, R26, syscall_getpid
+        MOVI  R1, 0xFFFFFFFF
+        JMP   syscall_return
 
-        ; Testa R0 == 1 → SYS_PRINT
-        LOAD  R3, [R13+8]      ; R3 = CONST_ONE = 1
-        SUB   R3, R0, R3       ; R3 = R0 - 1; Z se R0 == 1
-        JZ    SYS_PRINT
+syscall_exit:
+        MOVI  R26, CURRENT_PID_ADDR
+        LW    R26, R26, 0
+        MOVI  R27, ENTRY_SIZE
+        MUL   R27, R26, R27
+        MOVI  R28, PROC_TABLE
+        ADD   R27, R27, R28
+        SW    R0, R27, FIELD_STATE
+        POP   R28
+        POP   R27
+        POP   R26
+        JMP   scheduler_run
 
-        ; Syscall desconhecida → retorna 0xFFFF
-        LOAD  R0, [R13+9]      ; R0 = CONST_NEG1 = 0xFFFF
-        RET
+syscall_write:
+        PUSH  R1
+        MOV   R1, R2
+        CALL  uart_putchar
+        POP   R1
+        MOVI  R1, 0
+        JMP   syscall_return
 
-; ===========================================================================
-; SYS_HALT — para a CPU
-; ===========================================================================
+syscall_read:
+        CALL  uart_getchar
+        JMP   syscall_return
 
-SYS_HALT:
+syscall_malloc:
+        MOV   R1, R2
+        CALL  kmalloc
+        JMP   syscall_return
+
+syscall_free:
+        MOV   R1, R2
+        CALL  kfree
+        MOVI  R1, 0
+        JMP   syscall_return
+
+syscall_yield:
+        MOVI  R26, CURRENT_PID_ADDR
+        LW    R26, R26, 0
+        MOWI  R27, ENTRY_SIZE
+        MUL   R27, R26, R27
+        MOVI  R28, PROC_TABLE
+        ADD   R27, R27, R28
+        MFC   R28, CSR_EPC
+        ADDI  R28, R28, 1
+        SW    R28, R27, FIELD_PC
+        MOVI  R26, PROC_READY
+        SW    R26, R27, FIELD_STATE
+        POP   R28
+        POP   R27
+        POP   R26
+        JMP   scheduler_run
+
+syscall_getpid:
+        MOVI  R26, CURRENT_PID_ADDR
+        LW    R1, R26, 0
+        JMP   syscall_return
+
+syscall_return:
+        POP   R28
+        POP   R27
+        POP   R26
+        ERET
+
+; =============================================================================
+; irq_timer — handler de timer (IVT[5])
+; =============================================================================
+irq_timer:
+        PUSH  R26
+        PUSH  R27
+        PUSH  R28
+        MOVI  R26, CURRENT_PID_ADDR
+        LW    R26, R26, 0
+        MOVI  R27, ENTRY_SIZE
+        MUL   R27, R26, R27
+        MOVI  R28, PROC_TABLE
+        ADD   R27, R27, R28
+        MFC   R26, CSR_EPC
+        SW    R26, R27, FIELD_PC
+        SW    R30, R27, FIELD_SP
+        MOVI  R26, PROC_READY
+        SW    R26, R27, FIELD_STATE
+        MOVI  R26, TIMER_QUANTUM
+        MOVI  R27, TIMER_CMP
+        SW    R26, R27, 0
+        POP   R28
+        POP   R27
+        POP   R26
+        JMP   scheduler_run
+
+irq_uart:
+        ERET
+
+; =============================================================================
+; Handlers de excecao fatal
+; =============================================================================
+exc_illegal:
+        MOVI  R1, msg_illegal
+        CALL  uart_puts
         HLT
 
-; ===========================================================================
-; SYS_PRINT — "imprime" R1 (o simulador loga valor antes de HLT)
-; Convenção: o depurador pode interceptar e exibir R1
-; ===========================================================================
+exc_align:
+        MOVI  R1, msg_align
+        CALL  uart_puts
+        HLT
 
-SYS_PRINT:
-        ; O simulador/depurador intercepta este ponto e exibe o valor de R1
-        HLT                    ; captura do simulador
+exc_page_fault:
+        MOVI  R1, msg_pgfault
+        CALL  uart_puts
+        HLT
+
+exc_breakpoint:
+        MOVI  R1, msg_break
+        CALL  uart_puts
+        ERET
+
+exc_reserved:
+        HLT
+
+; =============================================================================
+; kmalloc — bump allocator
+; =============================================================================
+kmalloc:
+        MOVI  R26, HEAP_PTR_ADDR
+        LW    R27, R26, 0
+        MOVI  R28, HEAP_BASE
+        BNE   R27, R0, kmalloc_check
+        MOV   R27, R28
+kmalloc_check:
+        ADD   R28, R27, R1
+        MOVI  R26, HEAP_END
+        BGE   R28, R26, kmalloc_fail
+        MOV   R1, R27
+        MOVI  R26, HEAP_PTR_ADDR
+        SW    R28, R26, 0
+        RET
+kmalloc_fail:
+        MOVI  R1, 0
         RET
 
-; ===========================================================================
-; PROGRAMA DEMO — em 0x200 (copiado pelo loader para 0x100)
-;
-; Calcula N iterações de Fibonacci partindo de F0=0, F1=1.
-; NOTA EDUCACIONAL: este bloco usa opcodes binários (.WORD) para ilustrar
-; que mover código para outro endereço (0x200→0x100) quebra branches
-; absolutos — demonstração clássica do problema de relocação de código.
-; ===========================================================================
+kfree:
+        RET
 
-        .ORG 0x200
+; =============================================================================
+; uart_putchar — envia R1[7:0] pela UART (busy-wait)
+; =============================================================================
+uart_putchar:
+        MOVI  R26, UART_STATUS
+uart_putchar_wait:
+        LW    R27, R26, 0
+        ANDI  R27, R27, UART_TX_READY
+        BEQ   R27, R0, uart_putchar_wait
+        MOVI  R27, UART_TXDATA
+        SW    R1, R27, 0
+        RET
 
-        ; R1 = 0 (F_n-2), R2 = 1 (F_n-1), R3 = N = 8, R4 = 1
-        .WORD 0x8110            ; LOAD R1, [R0+16]  → R1=0
-        .WORD 0x8211            ; LOAD R2, [R0+17]  → R2=1
-        .WORD 0x8312            ; LOAD R3, [R0+18]  → R3=8
-        .WORD 0x8413            ; LOAD R4, [R0+19]  → R4=1
+; =============================================================================
+; uart_getchar — le R1[7:0] da UART (busy-wait)
+; =============================================================================
+uart_getchar:
+        MOVI  R26, UART_STATUS
+uart_getchar_wait:
+        LW    R27, R26, 0
+        ANDI  R27, R27, 0x2
+        BEQ   R27, R0, uart_getchar_wait
+        MOVI  R27, 0xFF01
+        LW    R1, R27, 0
+        ANDI  R1, R1, 0xFF
+        RET
 
-        ; Loop: R5 = R1 + R2; R1 = R2; R2 = R5; R3--
-        .WORD 0x0512            ; ADD R5, R1, R2
-        .WORD 0x0125            ; ADD R1, R2, R5 — ERRO INTENCIONAL: veja abaixo
-        .WORD 0x0251            ; ADD R2, R5, R1
+; =============================================================================
+; uart_puts — envia string terminada em zero (R1 = ponteiro)
+; =============================================================================
+uart_puts:
+        PUSH  R31
+        MOV   R26, R1
+uart_puts_loop:
+        LW    R27, R26, 0
+        BEQ   R27, R0, uart_puts_done
+        MOV   R1, R27
+        CALL  uart_putchar
+        ADDI  R26, R26, 1
+        JMP   uart_puts_loop
+uart_puts_done:
+        POP   R31
+        RET
 
-        ; R3--
-        .WORD 0x1334            ; SUB R3, R3, R4
+; =============================================================================
+; uart_puthex — imprime R1 como 8 hex digits
+; =============================================================================
+uart_puthex:
+        PUSH  R31
+        PUSH  R4
+        PUSH  R5
+        PUSH  R6
+        MOV   R4, R1
+        MOVI  R1, 0x30
+        CALL  uart_putchar
+        MOVI  R1, 0x78
+        CALL  uart_putchar
+        MOVI  R5, 28
+uart_puthex_loop:
+        BLT   R5, R0, uart_puthex_done
+        SHR   R6, R4, R5
+        ANDI  R6, R6, 0xF
+        MOVI  R1, 10
+        BLT   R6, R1, uart_puthex_digit
+        ADDI  R6, R6, 55
+        JMP   uart_puthex_emit
+uart_puthex_digit:
+        ADDI  R6, R6, 0x30
+uart_puthex_emit:
+        MOV   R1, R6
+        CALL  uart_putchar
+        ADDI  R5, R5, -4
+        JMP   uart_puthex_loop
+uart_puthex_done:
+        POP   R6
+        POP   R5
+        POP   R4
+        POP   R31
+        RET
 
-        ; JNZ loop (volta 4 posições: PC=0x100+8=0x108, volta para 0x104)
-        .WORD 0xC104            ; JNZ 0x104
+; =============================================================================
+; idle_process — PID 0
+; =============================================================================
+idle_process:
+        NOP
+        JMP   idle_process
 
-        ; HLT — resultado em R2
-        .WORD 0xF000            ; HLT
+; =============================================================================
+; demo_process — PID 1: calcula Fibonacci(10) e imprime via UART
+; =============================================================================
+demo_process:
+        MOVI  R2, 0
+        MOVI  R3, 1
+        MOVI  R4, 8
+demo_fib_loop:
+        BEQ   R4, R0, demo_fib_done
+        ADD   R5, R2, R3
+        MOV   R2, R3
+        MOV   R3, R5
+        ADDI  R4, R4, -1
+        JMP   demo_fib_loop
+demo_fib_done:
+        MOV   R1, R3
+        CALL  uart_puthex
+        MOVI  R1, 0x0A
+        CALL  uart_putchar
+        MOVI  R1, 0
+        SYSCALL
 
-        ; Dados: offset 16..19 a partir de base 0x200+0x10 = 0x210
-        .ORG 0x210
-        .WORD 0                 ; R1 = 0
-        .WORD 1                 ; R2 = 1
-        .WORD 8                 ; R3 = 8
-        .WORD 1                 ; R4 = 1
+; =============================================================================
+; Strings de mensagem (words = chars ASCII, terminadas em 0)
+; =============================================================================
+msg_boot:
+        .word 0x45, 0x64, 0x75, 0x52, 0x49, 0x53, 0x43, 0x2D
+        .word 0x33, 0x32, 0x76, 0x32, 0x20, 0x4B, 0x65, 0x72
+        .word 0x6E, 0x65, 0x6C, 0x20, 0x4F, 0x4B, 0x0A, 0x00
+
+msg_illegal:
+        .word 0x49, 0x4C, 0x4C, 0x45, 0x47, 0x41, 0x4C, 0x0A, 0x00
+
+msg_align:
+        .word 0x41, 0x4C, 0x49, 0x47, 0x4E, 0x0A, 0x00
+
+msg_pgfault:
+        .word 0x50, 0x47, 0x46, 0x41, 0x55, 0x4C, 0x54, 0x0A, 0x00
+
+msg_break:
+        .word 0x42, 0x52, 0x4B, 0x0A, 0x00

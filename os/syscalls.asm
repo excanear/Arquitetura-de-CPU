@@ -1,149 +1,105 @@
-﻿; ===========================================================================
-; syscalls.asm - Syscalls legadas do Micro-Kernel EduRISC-16
+; =============================================================================
+; syscalls.asm — Tabela de Syscalls EduRISC-32v2
 ;
-; ATENCAO:
-; Este arquivo pertence a uma trilha historica/educacional anterior ao
-; ambiente principal EduRISC-32v2. Ele permanece no repositorio como material
-; de referencia e compatibilidade, nao como definicao oficial de syscalls do
-; kernel atual.
+; Documentacao das chamadas de sistema do kernel EduRISC-32v2.
+; A implementacao real esta em kernel.asm (handler exc_syscall / IVT[3]).
 ;
-; Convencao de chamada de sistema:
-;   1. Coloque o numero da syscall em R0
-;   2. Argumentos em R1, R2 (se houver)
-;   3. Execute:  CALL SYS_DISPATCH    (endereco definido em kernel.asm)
-;   4. Resultado em R0 apos retorno
+; Como usar syscalls em assembly EduRISC-32v2:
+;   1. Coloque o numero da syscall em R1
+;   2. Coloque os argumentos em R2, R3 (se houver)
+;   3. Execute: SYSCALL
+;   4. O resultado retorna em R1 apos o ERET do handler
 ;
 ; Tabela de syscalls:
-;   0 - SYS_HALT    : para a CPU
-;   1 - SYS_PRINT   : exibe R1 (capturado pelo depurador/simulador)
-;   2 - SYS_ALLOC   : aloca R1 palavras; retorna endereco em R0
-;   3 - SYS_COPY    : copia R2 palavras de endereco R1 para R0
-;   4 - SYS_MEMSET  : preenche R2 palavras em endereco R0 com R1
 ;
-; Heap simples: cresce para cima a partir de HEAP_BASE = 0x0800
-;               controlado pelo ponteiro HEAP_PTR_VAR em 0x0080
+;   Num  Nome         Args              Retorno         Descricao
+;   ---  -----------  ----------------  --------------  -----------------------
+;   0    SYS_EXIT     —                 (nao retorna)   Encerra processo atual
+;   1    SYS_WRITE    R2=char           R1=0            Envia char pela UART
+;   2    SYS_READ     —                 R1=char         Le char da UART
+;   3    SYS_MALLOC   R2=words          R1=ptr ou 0     Aloca N words no heap
+;   4    SYS_FREE     R2=ptr            R1=0            Libera bloco (no-op nesta versao)
+;   5    SYS_YIELD    —                 —               Cede CPU (preempcao cooperativa)
+;   6    SYS_GETPID   —                 R1=pid          Retorna PID do processo atual
+;   7    SYS_HEAPSTAT —                 R1=bytes livres Diagnostico do heap
+;   8    SYS_UPTIME   —                 R1=ciclos       Retorna CSR[CYCLE]
 ;
-; IMPORTANTE: pressupoe R13 = 0 (definido em KERNEL_START do kernel.asm).
-; Constantes do kernel acessiveis via [R13+N]:
-;   [R13+8]  = 1      (CONST_ONE)
-;   [R13+9]  = 0xFFFF (CONST_NEG1)
-;   [R13+10] = 2      (CONST_TWO   -- numero syscall SYS_ALLOC)
-;   [R13+11] = 3      (CONST_THREE -- numero syscall SYS_COPY)
-;   [R13+12] = 4      (CONST_FOUR  -- numero syscall SYS_MEMSET)
-;   [R13+13] = 0x0080 (CONST_HEAP_PTR -- endereco de HEAP_PTR_VAR)
-;   [R13+14] = 0x0E00 (CONST_HEAP_LIM -- limite superior do heap)
-; ===========================================================================
+; Vetores de excecao (IVT — base em CSR[1]):
+;
+;   IVT[0]  exc_illegal    — instrucao ilegal (opcode invalido)
+;   IVT[1]  exc_align      — acesso nao alinhado a memoria
+;   IVT[2]  exc_page_fault — page fault (MMU)
+;   IVT[3]  exc_syscall    — SYSCALL (dispatcher de chamadas de sistema)
+;   IVT[4]  exc_breakpoint — instrucao BREAK (depuracao)
+;   IVT[5]  irq_timer      — interrupcao de timer (preempcao)
+;   IVT[6]  irq_uart       — interrupcao de UART
+;   IVT[7-15] exc_reserved — reservado (causa HLT se atingido)
+;
+; Codigos de CAUSE (CSR[3][3:0]):
+;   0  CAUSE_ILLEGAL  — instrucao ilegal
+;   1  CAUSE_ALIGN    — erro de alinhamento
+;   2  CAUSE_PGFAULT  — page fault
+;   3  CAUSE_SYSCALL  — SYSCALL
+;   4  CAUSE_BREAK    — BREAK
+;   5  CAUSE_TIMER    — timer (IRQ, bit[31]=1)
+;   6  CAUSE_UART     — UART  (IRQ, bit[31]=1)
+;
+; Codigos de STATUS (CSR[0]):
+;   bit 0  IE  — Interrupt Enable (1=habilitado)
+;   bit 1  KU  — Kernel/User mode (0=kernel, 1=user)
+;   bits 7:4  IM[3:0] — Interrupt Mask (1=permite)
+;
+; =============================================================================
 
-; ===========================================================================
-; SYS_DISPATCH_EXT -- extensao do despachante para syscalls 2, 3 e 4
-; Chamado pelo SYS_DISPATCH do kernel quando R0 >= 2.
-; Entrada:  R0 = numero da syscall
-; Retorno:  R0 = resultado
-; ===========================================================================
+; ---------------------------------------------------------------------------
+; Macros uteis para uso em programas assembly
+; ---------------------------------------------------------------------------
 
-        .ORG 0x040
+; syscall_exit: encerra o processo atual
+; Uso: CALL syscall_exit (ou use diretamente SYSCALL apos MOVI R1, 0)
+syscall_exit_stub:
+        MOVI  R1, 0
+        SYSCALL
+        ; nao retorna
 
-SYS_DISPATCH_EXT:
-        ; Testa R0 == 2 -> SYS_ALLOC
-        LOAD  R3, [R13+10]     ; R3 = CONST_TWO = 2
-        SUB   R3, R0, R3       ; R3 = R0 - 2; Z se R0==2
-        JZ    SYS_ALLOC_IMPL
-
-        ; Testa R0 == 3 -> SYS_COPY
-        LOAD  R3, [R13+11]     ; R3 = CONST_THREE = 3
-        SUB   R3, R0, R3       ; R3 = R0 - 3; Z se R0==3
-        JZ    SYS_COPY_IMPL
-
-        ; Testa R0 == 4 -> SYS_MEMSET
-        LOAD  R3, [R13+12]     ; R3 = CONST_FOUR = 4
-        SUB   R3, R0, R3       ; R3 = R0 - 4; Z se R0==4
-        JZ    SYS_MEMSET_IMPL
-
-        ; Syscall desconhecida -> retorna 0xFFFF
-        LOAD  R0, [R13+9]      ; R0 = CONST_NEG1 = 0xFFFF
+; syscall_write: envia caractere em R2 pela UART
+syscall_write_stub:
+        MOVI  R1, 1
+        SYSCALL
         RET
 
-; ===========================================================================
-; SYS_ALLOC_IMPL -- bump allocator
-;
-; Entrada:  R1 = palavras a alocar
-; Saida:    R0 = ponteiro para bloco alocado
-;
-; Algoritmo:
-;   R3 = 0x0080 via [R13+13]  -- endereco de HEAP_PTR_VAR
-;   R0 = mem[R3]              -- heap pointer atual
-;   R4 = R0 + R1              -- novo heap pointer
-;   mem[R3] = R4              -- atualiza heap pointer
-;   retorna R0                -- endereco do bloco alocado
-; ===========================================================================
-
-        .ORG 0x050
-
-SYS_ALLOC_IMPL:
-        LOAD  R3, [R13+13]     ; R3 = 0x0080 (endereco de HEAP_PTR_VAR)
-        LOAD  R0, [R3+0]       ; R0 = heap pointer atual
-        ADD   R4, R0, R1       ; R4 = novo heap pointer
-        STORE R4, [R3+0]       ; salva novo heap pointer
+; syscall_read: le caractere da UART, retorna em R1
+syscall_read_stub:
+        MOVI  R1, 2
+        SYSCALL
         RET
 
-; ===========================================================================
-; SYS_COPY_IMPL -- copia R2 palavras do endereco R1 para R0
-;
-; ADD Rd, Rs, R13 equivale a MOV Rd, Rs (R13=0 permanente no kernel)
-; ===========================================================================
-
-        .ORG 0x060
-
-SYS_COPY_IMPL:
-        LOAD  R6, [R13+8]      ; R6 = 1 (CONST_ONE)
-        ADD   R3, R0, R13      ; R3 = dst
-        ADD   R4, R1, R13      ; R4 = src
-        ADD   R5, R2, R13      ; R5 = count
-
-COPY_LOOP:
-        ADD   R7, R5, R13      ; R7 = count; Z se count == 0
-        JZ    COPY_DONE
-
-        LOAD  R7, [R4+0]       ; R7 = mem[src]
-        STORE R7, [R3+0]       ; mem[dst] = R7
-        ADD   R4, R4, R6       ; src++
-        ADD   R3, R3, R6       ; dst++
-        SUB   R5, R5, R6       ; count--
-
-        JMP   COPY_LOOP
-
-COPY_DONE:
+; syscall_malloc: aloca R2 words; retorna ponteiro em R1
+syscall_malloc_stub:
+        MOVI  R1, 3
+        SYSCALL
         RET
 
-; ===========================================================================
-; SYS_MEMSET_IMPL -- preenche R2 palavras a partir de R0 com valor R1
-; ===========================================================================
-
-        .ORG 0x070
-
-SYS_MEMSET_IMPL:
-        LOAD  R6, [R13+8]      ; R6 = 1 (CONST_ONE)
-        ADD   R3, R0, R13      ; R3 = dst
-        ADD   R4, R2, R13      ; R4 = count
-
-MEMSET_LOOP:
-        ADD   R5, R4, R13      ; R5 = count; Z se count == 0
-        JZ    MEMSET_DONE
-
-        STORE R1, [R3+0]       ; mem[dst] = valor
-        ADD   R3, R3, R6       ; dst++
-        SUB   R4, R4, R6       ; count--
-
-        JMP   MEMSET_LOOP
-
-MEMSET_DONE:
+; syscall_free: libera bloco em R2
+syscall_free_stub:
+        MOVI  R1, 4
+        SYSCALL
         RET
 
-; ===========================================================================
-; HEAP_PTR_VAR -- ponteiro do heap (endereco 0x080)
-; Inicializado com HEAP_BASE = 0x0800
-; ===========================================================================
+; syscall_yield: cede CPU voluntariamente
+syscall_yield_stub:
+        MOVI  R1, 5
+        SYSCALL
+        RET
 
-        .ORG 0x080
+; syscall_getpid: retorna PID do processo atual em R1
+syscall_getpid_stub:
+        MOVI  R1, 6
+        SYSCALL
+        RET
 
-HEAP_PTR_VAR:   .WORD 0x0800   ; heap comeca em 0x0800
+; syscall_uptime: retorna contador de ciclos (CSR[CYCLE]) em R1
+syscall_uptime_stub:
+        MOVI  R1, 8
+        SYSCALL
+        RET

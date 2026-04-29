@@ -78,7 +78,14 @@ class Deref:
     line: int
 
 
-Expr = IntLiteral | VarRef | BinOp | UnaryOp | FuncCall | ArrayRef | AddrOf | Deref
+@dataclass
+class StringLit:
+    """Literal de string: \"texto\" — armazenado na seção de dados."""
+    value: str   # conteúdo bruto (sem aspas externas, escapes preservados)
+    line:  int
+
+
+Expr = IntLiteral | VarRef | BinOp | UnaryOp | FuncCall | ArrayRef | AddrOf | Deref | StringLit
 
 
 # ---------------------------------------------------------------------------

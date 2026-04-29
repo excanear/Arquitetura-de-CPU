@@ -317,16 +317,15 @@ LOOP:
 # ---------------------------------------------------------------------------
 
 def test_eret_restores_pc():
-    """SYSCALL salva PC em CSR[0]; ERET restaura PC a partir de CSR[0]."""
+    """ERET restaura PC a partir de CSR[EPC] (índice 2, conforme ISA EduRISC-32v2)."""
     from assembler.assembler import Assembler
     from simulator.cpu_simulator import CPUSimulator
     from cpu.instruction_set import Opcode
 
-    # MTC CSR[0] = endereço alvo (0x5) manualmente, depois ERET
     # Instruções:
     #   0: MOVI R1, 5         → R1 = 5 (endereço de retorno)
-    #   1: MTC CSR[0], R1     → CSR[0] = 5 (sintaxe: MTC csr_idx, rs1)
-    #   2: ERET               → PC deve ir para 5
+    #   1: MTC  2, R1         → CSR[EPC] = 5  (CSR[2] = EPC conforme ISA spec)
+    #   2: ERET               → PC deve ir para CSR[EPC] = 5
     #   3: MOVI R2, 99        → NÃO deve executar (será pulado)
     #   4: MOVI R2, 99        → NÃO deve executar
     #   5: MOVI R3, 42        → deve executar
@@ -334,7 +333,7 @@ def test_eret_restores_pc():
     src = """
         .org 0x000000
         MOVI R1, 5
-        MTC  0, R1
+        MTC  2, R1
         ERET
         MOVI R2, 99
         MOVI R2, 99
@@ -347,3 +346,184 @@ def test_eret_restores_pc():
     sim.run(max_cycles=200)
     assert sim.rf[2] == 0, "R2 não deveria ter sido tocado"
     assert sim.rf[3] == 42, f"R3 esperado 42, obteve {sim.rf[3]}"
+
+
+# ---------------------------------------------------------------------------
+# MMU / TLB — tradução de endereços virtuais
+# ---------------------------------------------------------------------------
+
+def test_mmu_kernel_mode_identity():
+    """Em modo kernel (STATUS.KU=0, padrão), o endereço físico é igual ao virtual."""
+    from simulator.cpu_simulator import CPUSimulator, _TLBModel
+    from cpu.instruction_set import CSR_PTBR
+
+    tlb = _TLBModel()
+    # Cria memória mínima com um PTE válido apontando para frame 5
+    # (não deve ser consultado em modo kernel)
+    mem = [0] * 512
+    ptbr = 0
+    # translate com mem e ptbr inválidos — deve retornar identidade sem consultar TLB
+    # Simulamos chamando _translate_addr via um CPUSimulator com KU=0
+    sim = CPUSimulator()
+    # KU=0 por padrão → modo kernel
+    # _mmu_active() deve retornar False
+    assert not sim._mmu_active(), "MODE_KU=0 deve desativar MMU"
+    # Tradução deve ser identidade
+    result = sim._translate_addr(0x1000)
+    assert result == 0x1000, f"identidade esperada, got {result:#x}"
+
+
+def test_mmu_tlb_miss_then_hit():
+    """Primeiro acesso a uma página: TLB miss + page walk. Segundo: TLB hit."""
+    from simulator.cpu_simulator import _TLBModel
+
+    PAGE_BITS = _TLBModel.PAGE_BITS   # 10
+    PTE_V = _TLBModel.PTE_V
+    PTE_R = _TLBModel.PTE_R
+    PTE_W = _TLBModel.PTE_W
+
+    tlb = _TLBModel()
+    # Monta uma memória com page table na posição 0
+    mem = [0] * 4096
+
+    ptbr = 0       # base da page table em word 0
+    vpn  = 3       # VPN que queremos traduzir
+    pfn  = 7       # frame físico alvo
+
+    # PTE para VPN=3 em mem[ptbr + vpn] = mem[3]
+    # flags: V=1, R=1, W=1
+    pte_flags = PTE_V | PTE_R | PTE_W
+    mem[ptbr + vpn] = (pfn << PAGE_BITS) | pte_flags
+
+    # Endereço virtual: VPN=3, offset=5
+    va = (vpn << PAGE_BITS) | 5
+
+    # Primeiro acesso → miss
+    pa1 = tlb.translate(va, mem, ptbr)
+    expected_pa = pfn * (1 << PAGE_BITS) + 5
+    assert pa1 == expected_pa, f"PA esperado {expected_pa}, got {pa1}"
+    assert tlb.misses == 1
+    assert tlb.hits   == 0
+
+    # Segundo acesso mesma página → hit
+    pa2 = tlb.translate(va, mem, ptbr)
+    assert pa2 == expected_pa
+    assert tlb.hits   == 1
+    assert tlb.misses == 1
+
+
+def test_tlb_page_fault_invalid_pte():
+    """PTE com V=0 → tradução retorna None (page fault)."""
+    from simulator.cpu_simulator import _TLBModel
+
+    PAGE_BITS = _TLBModel.PAGE_BITS
+
+    tlb = _TLBModel()
+    mem = [0] * 512
+
+    ptbr = 0
+    vpn  = 1
+    # PTE com V=0 (inválido)
+    mem[ptbr + vpn] = 0
+
+    va = (vpn << PAGE_BITS) | 0
+
+    result = tlb.translate(va, mem, ptbr)
+    assert result is None, "PTE inválido deve retornar None (page fault)"
+    assert tlb.misses == 1
+
+
+def test_tlb_permission_write_fault():
+    """PTE sem flag W → write access retorna None (page fault)."""
+    from simulator.cpu_simulator import _TLBModel
+
+    PAGE_BITS = _TLBModel.PAGE_BITS
+    PTE_V = _TLBModel.PTE_V
+    PTE_R = _TLBModel.PTE_R
+    # PTE sem PTE_W (somente leitura)
+
+    tlb = _TLBModel()
+    mem = [0] * 512
+
+    ptbr = 0
+    vpn  = 2
+    pfn  = 4
+    mem[ptbr + vpn] = (pfn << PAGE_BITS) | PTE_V | PTE_R  # R-only
+
+    va = (vpn << PAGE_BITS) | 10
+
+    # Leitura deve ter sucesso
+    pa = tlb.translate(va, mem, ptbr, write=False)
+    assert pa is not None, "Leitura em página R deve ter sucesso"
+
+    # Reset TLB e testa escrita
+    tlb2 = _TLBModel()
+    pa_write = tlb2.translate(va, mem, ptbr, write=True)
+    assert pa_write is None, "Escrita em página R-only deve retornar None"
+
+
+def test_tlb_flush():
+    """TLBFLUSH invalida entradas — próximo acesso faz page walk novamente."""
+    from simulator.cpu_simulator import _TLBModel
+
+    PAGE_BITS = _TLBModel.PAGE_BITS
+    PTE_V = _TLBModel.PTE_V
+    PTE_R = _TLBModel.PTE_R
+
+    tlb  = _TLBModel()
+    mem  = [0] * 512
+    ptbr = 0
+    vpn  = 1
+    pfn  = 9
+    mem[ptbr + vpn] = (pfn << PAGE_BITS) | PTE_V | PTE_R
+
+    va = (vpn << PAGE_BITS) | 0
+
+    # Preenche TLB
+    tlb.translate(va, mem, ptbr)
+    assert tlb.misses == 1 and tlb.hits == 0
+
+    # Acessa novamente → hit
+    tlb.translate(va, mem, ptbr)
+    assert tlb.hits == 1
+
+    # Flush
+    tlb.flush()
+    assert tlb.flushes == 1
+
+    # Acessa novamente → miss (entradas invalidadas)
+    tlb.translate(va, mem, ptbr)
+    assert tlb.misses == 2
+    assert tlb.hits   == 1   # não incrementou
+
+
+def test_tlbflush_via_csr_write():
+    """Escrita em CSR_TLBCTL com bit 0 set dispara flush da TLB."""
+    from simulator.cpu_simulator import CPUSimulator
+    from cpu.instruction_set import CSR_TLBCTL, CSR_STATUS, STATUS_KU, CSR_PTBR
+
+    sim = CPUSimulator()
+
+    # Preenche TLB com uma entrada (modo usuário)
+    PAGE_BITS = sim.tlb.PAGE_BITS
+    PTE_V = sim.tlb.PTE_V
+    PTE_R = sim.tlb.PTE_R
+
+    ptbr = 10
+    vpn  = 0
+    pfn  = 5
+    mem  = sim.mem
+    mem[ptbr + vpn] = (pfn << PAGE_BITS) | PTE_V | PTE_R
+
+    # Ativa modo usuário temporariamente para traduzir
+    sim.csrs[CSR_STATUS] = STATUS_KU
+    sim.csrs[CSR_PTBR]   = ptbr
+    sim.tlb.translate(0, mem, ptbr)   # miss → carrega entrada na TLB
+    assert sim.tlb.misses == 1
+
+    # Dispara flush via CSR_TLBCTL
+    sim._csr_write(CSR_TLBCTL, 1)
+    assert sim.tlb.flushes == 1
+
+    # CSR_TLBCTL deve ter sido auto-cleared
+    assert sim.csrs[CSR_TLBCTL] == 0

@@ -24,6 +24,12 @@ from cpu.instruction_set import (
     Opcode, InstFmt, decode, disassemble,
     WORD_MASK, MEM_SIZE, LR_REG, SP_REG, ZERO_REG,
     NOP_WORD,
+    # CSR constants
+    CSR_STATUS, CSR_IVT, CSR_EPC, CSR_CAUSE, CSR_ESCRATCH,
+    CSR_PTBR, CSR_TLBCTL, CSR_CYCLE, CSR_CYCLEH, CSR_INSTRET,
+    CSR_ICOUNT, CSR_DCMISS, CSR_ICMISS, CSR_BRMISS, NUM_CSRS,
+    STATUS_IE, STATUS_KU, CAUSE_SYSCALL, CAUSE_BREAK, CAUSE_ILLEGAL,
+    CAUSE_PGFAULT, CAUSE_IRQ_FLAG,
 )
 from cpu.registers import RegisterFile
 from cpu.alu import ALU
@@ -40,6 +46,180 @@ _COND_BRANCHES = frozenset({
 # Endereço inicial do stack pointer (topo da área de pilha, crescendo para baixo).
 # Mantido separado do segmento de código (0x000000–) e dados intermediários.
 _SP_INIT: int = 0x010000   # 64 K → área de pilha começa em 0x00FFFF downward
+
+
+# ---------------------------------------------------------------------------
+# Modelo de Cache (Direct-Mapped, Write-Back)
+# ---------------------------------------------------------------------------
+
+class _CacheModel:
+    """
+    Simula uma cache direct-mapped de write-back para contagem de hit/miss.
+    Não modela latência de stall aqui — apenas rastreia hits e misses para
+    os CSRs de performance (ICMISS, DCMISS) e as métricas de diagnóstico.
+
+    Parâmetros:
+        sets             — número de conjuntos (linhas)
+        words_per_line   — palavras de 32 bits por linha de cache
+        name             — "I" ou "D" para logging
+    """
+
+    def __init__(self, sets: int = 256, words_per_line: int = 4, name: str = "?"):
+        self.sets           = sets
+        self.wpl            = words_per_line   # words per line
+        self.name           = name
+        self.hits           = 0
+        self.misses         = 0
+        self._valid: list[bool] = [False] * sets
+        self._tags:  list[int]  = [0]     * sets
+
+    def reset(self):
+        self.hits   = 0
+        self.misses = 0
+        self._valid = [False] * self.sets
+        self._tags  = [0]     * self.sets
+
+    def access(self, word_addr: int) -> bool:
+        """
+        Registra um acesso ao endereço `word_addr`.
+        Retorna True se hit, False se miss.
+        """
+        set_idx = (word_addr // self.wpl) % self.sets
+        tag     = word_addr // (self.sets * self.wpl)
+        if self._valid[set_idx] and self._tags[set_idx] == tag:
+            self.hits += 1
+            return True
+        # Miss — carrega nova linha
+        self.misses += 1
+        self._valid[set_idx] = True
+        self._tags[set_idx]  = tag
+        return False
+
+    @property
+    def hit_rate(self) -> float:
+        total = self.hits + self.misses
+        return self.hits / total if total > 0 else 0.0
+
+
+# ---------------------------------------------------------------------------
+# Modelo de MMU / TLB (Sv32-like, 2-level page tables)
+# ---------------------------------------------------------------------------
+
+class _TLBModel:
+    """
+    TLB totalmente associativa de 32 entradas com política de substituição LRU.
+
+    Mapeamento Sv32-like:
+      VA[31:12] = VPN (número de página virtual)
+      VA[11:0]  = offset dentro da página (4 KB = 4096 bytes = 1024 words)
+
+    Para EduRISC-32v2 (endereços em words de 32 bits):
+      VA[25:10] = VPN (16 bits — 26-bit addr, top 16 bits = VPN)
+      VA[9:0]   = offset em words dentro da página (1 KB de words = 4 KB bytes)
+
+    Tabela de páginas de 2 níveis (simplificado):
+      PTE = mem[PTBR + VPN] — Physical Frame Number (PFN) na memória do simulador.
+      Endereço físico = PFN * 1024 + VA[9:0]   (em word units)
+
+    Flags do PTE (bits baixos):
+      bit 0: Valid (V)
+      bit 1: Read  (R)
+      bit 2: Write (W)
+      bit 3: Execute(X)
+    """
+
+    ENTRIES       = 32    # número de entradas TLB
+    PAGE_BITS     = 10    # bits de offset (1024 words = 4 KB)
+    PAGE_SIZE     = 1 << PAGE_BITS   # 1024 words
+
+    PTE_V  = (1 << 0)   # Valid
+    PTE_R  = (1 << 1)   # Readable
+    PTE_W  = (1 << 2)   # Writable
+    PTE_X  = (1 << 3)   # Executable
+
+    def __init__(self):
+        self.misses:  int = 0
+        self.hits:    int = 0
+        self.flushes: int = 0
+        # Entradas: (vpn, pfn, flags) | None = inválido
+        self._entries: list[tuple[int, int, int] | None] = [None] * self.ENTRIES
+        # LRU counter
+        self._lru: list[int] = [0] * self.ENTRIES
+        self._clock: int = 0
+
+    def reset(self):
+        self.misses  = 0
+        self.hits    = 0
+        self.flushes = 0
+        self._entries = [None] * self.ENTRIES
+        self._lru     = [0]   * self.ENTRIES
+        self._clock   = 0
+
+    def flush(self):
+        """TLBFLUSH: invalida todas as entradas (context switch)."""
+        self._entries = [None] * self.ENTRIES
+        self._lru     = [0]   * self.ENTRIES
+        self.flushes += 1
+
+    def translate(self, va: int, mem: list[int], ptbr: int,
+                  write: bool = False, exec_: bool = False) -> int | None:
+        """
+        Traduz endereço virtual (word addr) para físico.
+
+        Retorna o endereço físico em words, ou None se page fault.
+        Atualiza misses/hits; em miss, faz Page Table Walk em `mem`.
+        """
+        vpn    = va >> self.PAGE_BITS
+        offset = va  & (self.PAGE_SIZE - 1)
+
+        # Procura na TLB (fully associative)
+        self._clock += 1
+        for i, entry in enumerate(self._entries):
+            if entry is None:
+                continue
+            evpn, pfn, flags = entry
+            if evpn != vpn:
+                continue
+            if not (flags & self.PTE_V):
+                continue
+            if write  and not (flags & self.PTE_W):
+                return None   # page fault: sem permissão de escrita
+            if exec_  and not (flags & self.PTE_X):
+                return None   # page fault: sem permissão de execução
+            self._lru[i] = self._clock
+            self.hits += 1
+            return pfn * self.PAGE_SIZE + offset
+
+        # TLB miss → Page Table Walk
+        self.misses += 1
+        pte_addr = ptbr + vpn     # índice direto (1-level simplificado)
+        if pte_addr >= len(mem):
+            return None           # page fault: endereço de PTE fora da memória
+
+        pte   = mem[pte_addr]
+        flags = pte & 0xF
+        pfn   = pte >> self.PAGE_BITS
+
+        if not (flags & self.PTE_V):
+            return None           # page fault: PTE inválido
+
+        # Carrega na TLB (substitui LRU)
+        lru_idx = self._lru.index(min(self._lru))
+        self._entries[lru_idx] = (vpn, pfn, flags)
+        self._lru[lru_idx]     = self._clock
+
+        # Verifica permissões
+        if write  and not (flags & self.PTE_W):
+            return None
+        if exec_  and not (flags & self.PTE_X):
+            return None
+
+        return pfn * self.PAGE_SIZE + offset
+
+    @property
+    def hit_rate(self) -> float:
+        total = self.hits + self.misses
+        return self.hits / total if total > 0 else 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -83,6 +263,8 @@ class SimStats:
     memory_reads:   int = 0
     memory_writes:  int = 0
     branches_taken: int = 0
+    mul_stalls:     int = 0   # ciclos extras por MUL (3-cycle pipeline)
+    div_stalls:     int = 0   # ciclos extras por DIV (32-cycle FSM)
 
 
 class CPUSimulator:
@@ -104,12 +286,21 @@ class CPUSimulator:
         self.hazard: HazardUnit     = HazardUnit()
         self.fwd:    ForwardingUnit = ForwardingUnit()
 
-        # Banco de 32 Registradores de Controle e Status (CSRs)
-        self.csrs: list[int] = [0] * 32
+        # Banco de CSRs com semântica real (NUM_CSRS = 32 registradores)
+        self.csrs: list[int] = [0] * NUM_CSRS
+
+        # Modelo de cache (I-cache e D-cache — 4 KB cada, direct-mapped)
+        self.icache: _CacheModel = _CacheModel(sets=256, words_per_line=4, name="I")
+        self.dcache: _CacheModel = _CacheModel(sets=256, words_per_line=4, name="D")
+
+        # Modelo de MMU/TLB (32 entradas, fully-associative, LRU)
+        self.tlb: _TLBModel = _TLBModel()
 
         self.pc:            int  = 0
         self.halted:        bool = False
         self.fetch_stopped: bool = False   # HLT visto em EX: para de buscar
+        # Latência de MUL/DIV: ciclos restantes antes de liberar o pipeline
+        self._exec_stall_cycles: int = 0
 
         self.ifid:  IFIDReg  = IFIDReg()
         self.idex:  IDEXReg  = IDEXReg()
@@ -142,10 +333,11 @@ class CPUSimulator:
     def reset(self):
         """Reinicia CPU (mantém conteúdo de memória)."""
         self.rf     = RegisterFile()
-        self.csrs   = [0] * 32
+        self.csrs   = [0] * NUM_CSRS
         self.pc     = 0
         self.halted = False
         self.fetch_stopped = False
+        self._exec_stall_cycles = 0
         self.ifid   = IFIDReg()
         self.idex   = IDEXReg()
         self.exmem  = EXMEMReg()
@@ -154,6 +346,9 @@ class CPUSimulator:
         self.stats   = SimStats()
         self.log     = []
         self._stage_dis = {s: "--" for s in ("IF", "ID", "EX", "MEM", "WB")}
+        self.icache.reset()
+        self.dcache.reset()
+        self.tlb.reset()
         # SP (R30) inicializado no topo da área de pilha
         self.rf[SP_REG] = _SP_INIT
 
@@ -185,6 +380,15 @@ class CPUSimulator:
         """Executa um ciclo completo do pipeline (ordem: WB → MEM → EX → ID → IF)."""
         stall = False
         flush = False
+
+        # ---- Stall de execução longa (MUL 3-ciclos, DIV 32-ciclos) ----------
+        if self._exec_stall_cycles > 0:
+            self._exec_stall_cycles -= 1
+            self.stats.cycles  += 1
+            self.stats.stalls  += 1
+            self.csrs[CSR_CYCLE] = (self.csrs[CSR_CYCLE] + 1) & WORD_MASK
+            self.csrs[CSR_ICOUNT] = (self.csrs[CSR_ICOUNT] + 1) & WORD_MASK
+            return self._snapshot(True, False)
 
         # ---- WB -----------------------------------------------------------
         self._stage_wb()
@@ -219,6 +423,14 @@ class CPUSimulator:
         self.stats.cycles += 1
         if flush:
             self.stats.flushes += 1
+
+        # Atualiza CSRs de performance (CYCLE, CYCLEH, INSTRET, ICOUNT)
+        cycle64 = (self.csrs[CSR_CYCLEH] << 32) | self.csrs[CSR_CYCLE]
+        cycle64 = (cycle64 + 1) & 0xFFFF_FFFF_FFFF_FFFF
+        self.csrs[CSR_CYCLE]  = cycle64 & WORD_MASK
+        self.csrs[CSR_CYCLEH] = (cycle64 >> 32) & WORD_MASK
+        if stall:
+            self.csrs[CSR_ICOUNT] = (self.csrs[CSR_ICOUNT] + 1) & WORD_MASK
 
         return self._snapshot(stall, flush)
 
@@ -265,7 +477,12 @@ class CPUSimulator:
 
         # Load — com suporte a byte (LB/LBU), halfword (LH/LHU) e word (LW)
         if exm.ctrl.mem_read:
-            addr     = exm.mem_addr & (len(self.mem) - 1)
+            va       = exm.mem_addr
+            pa       = self._translate_addr(va, write=False, fault_pc=exm.pc if hasattr(exm, "pc") else 0)
+            if pa is None:
+                return False, 0   # page fault já tratado
+            addr     = pa & (len(self.mem) - 1)
+            self.dcache.access(addr)   # registra acesso ao D-cache
             raw_word = self.mem[addr]
             size     = exm.ctrl.mem_size   # 0=byte, 1=halfword, 2=word
 
@@ -290,7 +507,12 @@ class CPUSimulator:
 
         # Store — com suporte a byte (SB), halfword (SH) e word (SW)
         elif exm.ctrl.mem_write:
-            addr = exm.mem_addr & (len(self.mem) - 1)
+            va   = exm.mem_addr
+            pa   = self._translate_addr(va, write=True, fault_pc=exm.pc if hasattr(exm, "pc") else 0)
+            if pa is None:
+                return False, 0   # page fault já tratado
+            addr = pa & (len(self.mem) - 1)
+            self.dcache.access(addr)   # registra acesso ao D-cache
             size = exm.ctrl.mem_size   # 0=byte, 1=halfword, 2=word
             val  = exm.rs2_val & WORD_MASK
 
@@ -356,17 +578,20 @@ class CPUSimulator:
             self.fetch_stopped = True
             return
 
-        # ---- SYSCALL / ERET ------------------------------------------------
-        if ide.ctrl.syscall or ide.ctrl.eret:
-            self._stage_dis["EX"] = opcode.name
+        # ---- SYSCALL / ERET / BREAK ----------------------------------------
+        if ide.ctrl.syscall or ide.ctrl.eret or opcode == Opcode.BREAK:
             if ide.ctrl.syscall:
-                # SYSCALL: salva PC+1 em CSR_EPC (índice 0) e salta para handler
-                # (handler não definido no sim — registra e continua)
-                self.csrs[0] = (self.pc) & WORD_MASK   # salva PC atual (após HLT pipeline)
-            if ide.ctrl.eret:
-                # ERET: restaura PC a partir de CSR_EPC (índice 0)
+                self._raise_exception(CAUSE_SYSCALL, ide.pc_plus1 - 1)
+            elif opcode == Opcode.BREAK:
+                self._raise_exception(CAUSE_BREAK, ide.pc_plus1 - 1)
+            elif ide.ctrl.eret:
+                # ERET: PC = EPC; STATUS.IE = 1; saí do modo de exceção
+                epc = self.csrs[CSR_EPC] & (len(self.mem) - 1)
+                # Restaura IE no STATUS
+                self.csrs[CSR_STATUS] = (self.csrs[CSR_STATUS] | STATUS_IE) & WORD_MASK
                 self.exmem.take_jump = True
-                self.exmem.jump_pc   = self.csrs[0] & WORD_MASK
+                self.exmem.jump_pc   = epc
+                self._stage_dis["EX"] = f"ERET→0x{epc:08X}"
             return
 
         # ---- PUSH: SP--; Mem[SP] = rs1 ------------------------------------
@@ -472,7 +697,7 @@ class CPUSimulator:
         # ---- MFC: rd ← CSR[idx] -------------------------------------------
         if opcode == Opcode.MFC:
             csr_idx = ide.rs2_val & 0x1F   # índice CSR nos bits [4:0] do imediato
-            val = self.csrs[csr_idx] & WORD_MASK
+            val = self._csr_read(csr_idx)
             self.exmem.alu_result = val
             self.exmem.rd = ide.rd
             self._stage_dis["EX"] = f"MFC R{ide.rd} ← CSR[{csr_idx}]=0x{val:08X}"
@@ -481,7 +706,7 @@ class CPUSimulator:
         # ---- MTC: CSR[idx] ← rs1 ------------------------------------------
         if opcode == Opcode.MTC:
             csr_idx = ide.rs2_val & 0x1F   # índice CSR nos bits [4:0] do imediato
-            self.csrs[csr_idx] = a & WORD_MASK
+            self._csr_write(csr_idx, a & WORD_MASK)
             self.exmem.rd = 0              # MTC não escreve registrador
             self._stage_dis["EX"] = f"MTC CSR[{csr_idx}] ← 0x{a:08X}"
             self.stats.instructions += 1
@@ -489,6 +714,16 @@ class CPUSimulator:
 
         result = self.alu.execute(opcode, a, b)
         self.exmem.alu_result = result.value
+
+        # Modela latência de MUL (3 ciclos) e DIV (32 ciclos) com stalls
+        if opcode in (Opcode.MUL, Opcode.MULH):
+            extra = 2   # 3 ciclos total: 1 já executado + 2 de stall
+            self._exec_stall_cycles = extra
+            self.stats.mul_stalls += extra
+        elif opcode in (Opcode.DIV, Opcode.DIVU, Opcode.REM):
+            extra = 31  # 32 ciclos total: 1 já executado + 31 de stall
+            self._exec_stall_cycles = extra
+            self.stats.div_stalls += extra
 
         # Atualiza flags de status apenas para operações que as afetam
         if not (ide.ctrl.jump or ide.ctrl.call or ide.ctrl.halt):
@@ -638,12 +873,28 @@ class CPUSimulator:
     # ---- IF ---------------------------------------------------------------
 
     def _stage_if(self):
-        """Estágio IF: busca instrução da memória no endereço PC."""
+        """Estágio IF: busca instrução da memória no endereço PC.
+        Se a MMU estiver ativa (user mode), traduz VA→PA via TLB.
+        Um page fault no IF dispara exceção CAUSE_PGFAULT.
+        """
         if self.fetch_stopped or self.pc >= len(self.mem):
             self._stage_dis["IF"] = "--"
             self.ifid.valid = False
             return
-        word = self.mem[self.pc]
+        # Tradução MMU para busca de instrução (exec=True)
+        pa = self._translate_addr(self.pc, exec_=True, fault_pc=self.pc)
+        if pa is None:
+            # Page fault já foi tratado em _raise_exception; aborta fetch
+            self._stage_dis["IF"] = "PGFAULT"
+            self.ifid.valid = False
+            return
+        # Registra acesso ao I-cache (impacta CSR_ICMISS via _csr_read)
+        self.icache.access(pa)
+        if pa >= len(self.mem):
+            self._stage_dis["IF"] = "--"
+            self.ifid.valid = False
+            return
+        word = self.mem[pa]
         self.ifid.instruction = word
         self.ifid.pc_plus1    = self.pc + 1
         self.ifid.valid       = True
@@ -679,6 +930,107 @@ class CPUSimulator:
         self.log.append(f"[C{self.stats.cycles:05d}] {msg}")
 
     # -----------------------------------------------------------------------
+    # CSR helpers — leitura/escrita com semântica real
+    # -----------------------------------------------------------------------
+
+    # -----------------------------------------------------------------------
+    # Tradução de endereço virtual → físico via MMU/TLB
+    # -----------------------------------------------------------------------
+
+    def _mmu_active(self) -> bool:
+        """Retorna True se a MMU está ativa (modo usuário: STATUS.KU=1 e PTBR≠0)."""
+        return bool(
+            (self.csrs[CSR_STATUS] & STATUS_KU) and
+            self.csrs[CSR_PTBR] != 0
+        )
+
+    def _translate_addr(self, va: int, write: bool = False,
+                        exec_: bool = False, fault_pc: int = 0) -> int | None:
+        """
+        Traduz endereço virtual `va` para físico.
+        - Em modo kernel (KU=0 ou PTBR=0): identidade (pa = va).
+        - Em modo usuário: usa TLB/page-table walk.
+        Retorna endereço físico (int), ou dispara CAUSE_PGFAULT e retorna None.
+        """
+        if not self._mmu_active():
+            return va  # identidade: sem tradução
+        pa = self.tlb.translate(va, self.mem, self.csrs[CSR_PTBR],
+                                write=write, exec_=exec_)
+        if pa is None:
+            self._raise_exception(CAUSE_PGFAULT, fault_pc)
+        return pa
+
+    def _csr_read(self, idx: int) -> int:
+        idx &= 0x1F
+        if idx == CSR_CYCLE:
+            return self.stats.cycles & WORD_MASK
+        if idx == CSR_CYCLEH:
+            return (self.stats.cycles >> 32) & WORD_MASK
+        if idx == CSR_INSTRET:
+            return self.stats.instructions & WORD_MASK
+        if idx == CSR_ICOUNT:
+            return self.stats.stalls & WORD_MASK
+        if idx == CSR_ICMISS:
+            return self.icache.misses & WORD_MASK
+        if idx == CSR_DCMISS:
+            return self.dcache.misses & WORD_MASK
+        if idx == CSR_BRMISS:
+            return self.stats.flushes & WORD_MASK
+        return self.csrs[idx] & WORD_MASK
+
+    def _csr_write(self, idx: int, val: int):
+        """Escreve CSR: CSRs de performance são somente-leitura; outros aceitam escrita.
+        Escrita em CSR_TLBCTL (bit 0 = FLUSH) aciona flush da TLB.
+        """
+        idx &= 0x1F
+        val &= WORD_MASK
+        # CSRs de performance são somente-leitura pelo software
+        if idx in (CSR_CYCLE, CSR_CYCLEH, CSR_INSTRET, CSR_ICOUNT,
+                   CSR_ICMISS, CSR_DCMISS, CSR_BRMISS):
+            return
+        self.csrs[idx] = val
+        # CSR_TLBCTL: qualquer escrita com bit 0 set aciona flush da TLB
+        if idx == CSR_TLBCTL and (val & 1):
+            self.tlb.flush()
+            self.csrs[CSR_TLBCTL] = 0   # auto-clear após flush
+
+    # -----------------------------------------------------------------------
+    # Mecanismo de exceção / trap
+    # -----------------------------------------------------------------------
+
+    def _raise_exception(self, cause: int, pc_of_faulting_instr: int):
+        """
+        Dispara uma exceção: salva EPC, define CAUSE, desabilita IE,
+        e redireciona PC para o vetor IVT[cause].
+
+        O hardware faz esse trabalho; aqui modelamos no simulador.
+        O IVT é uma tabela na memória cuja base está em CSR_IVT.
+        Cada entrada é uma instrução JMP de 32 bits — lemos o destino
+        diretamente da memória (índice cause a partir da base IVT).
+        """
+        # 1. Salva PC da instrução problemática em EPC
+        self.csrs[CSR_EPC] = pc_of_faulting_instr & WORD_MASK
+        # 2. Define causa
+        self.csrs[CSR_CAUSE] = cause & WORD_MASK
+        # 3. Desabilita interrupções (IE=0) e entra em modo kernel (KU=0)
+        self.csrs[CSR_STATUS] = self.csrs[CSR_STATUS] & ~(STATUS_IE | STATUS_KU) & WORD_MASK
+        # 4. Determina vetor de handler:
+        #    IVT base em CSR_IVT; cada entrada é uma instrução JMP (Formato-J).
+        #    O endereço do destino do JMP é addr26 (bits [25:0] da instrução).
+        ivt_base  = self.csrs[CSR_IVT] & (len(self.mem) - 1)
+        vec_addr  = (ivt_base + (cause & 0xF)) & (len(self.mem) - 1)
+        jmp_word  = self.mem[vec_addr]
+        # Extrai addr26 de uma instrução JMP (bits [25:0])
+        handler_pc = jmp_word & 0x03FF_FFFF
+        # 5. Flush pipeline e salta para handler
+        self._flush_if_id_ex()
+        self.fetch_stopped = False
+        self.pc = handler_pc & (len(self.mem) - 1)
+        cause_name = {0:"ILLEGAL",1:"ALIGN",2:"PGFAULT",3:"SYSCALL",4:"BREAK"}.get(cause, f"EXC{cause}")
+        self._log(f"TRAP {cause_name}: EPC=0x{pc_of_faulting_instr:08X} → handler=0x{handler_pc:08X}")
+        self._stage_dis["EX"] = f"TRAP({cause_name})"
+
+    # -----------------------------------------------------------------------
     # Display
     # -----------------------------------------------------------------------
 
@@ -698,6 +1050,15 @@ class CPUSimulator:
             print("\n  CSRs (não-zero):")
             for idx, val in csr_nz:
                 print(f"    CSR[{idx:2d}] = 0x{val:08X}  ({val})")
+        # Cache statistics
+        print(f"\n  I-Cache: hits={self.icache.hits}, misses={self.icache.misses}, "
+              f"hit-rate={self.icache.hit_rate:.1%}")
+        print(f"  D-Cache: hits={self.dcache.hits}, misses={self.dcache.misses}, "
+              f"hit-rate={self.dcache.hit_rate:.1%}")
+        # TLB statistics
+        mmu_state = "ATIVO" if self._mmu_active() else "inativo"
+        print(f"  TLB ({mmu_state}): hits={self.tlb.hits}, misses={self.tlb.misses}, "
+              f"flushes={self.tlb.flushes}, hit-rate={self.tlb.hit_rate:.1%}")
         print(f"\n  Estatísticas:")
         print(f"    Ciclos:           {self.stats.cycles}")
         print(f"    Instruções:       {self.stats.instructions}")
