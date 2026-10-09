@@ -1,7 +1,5 @@
 <div align="center">
 
-# EM DESENVOLVIMENTO
-
 # EduRISC-32v2 · Full Computing Platform
 
 **Arquitetura de CPU do zero — do transistor ao hypervisor**
