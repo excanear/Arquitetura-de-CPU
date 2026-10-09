@@ -30,13 +30,48 @@ import argparse
 # ---------------------------------------------------------------------------
 
 def _load_hex(path: str) -> list[int]:
-    """Carrega arquivo .hex (um valor hex por linha) em lista de int."""
-    words = []
+    """Carrega um arquivo .hex em lista de palavras (int de 32 bits).
+
+    Aceita dois formatos:
+      * Intel HEX (o que `assemble` gera): registros ':LLAAAATT....CC',
+        palavra = 4 bytes big-endian, endereço de byte = word_index*4.
+      * Hex puro: uma palavra hex por linha (compatibilidade).
+    """
     with open(path, encoding="utf-8") as f:
-        for line in f:
+        raw_lines = f.read().splitlines()
+
+    if any(l.strip().startswith(":") for l in raw_lines):
+        words_by_addr: dict[int, int] = {}
+        for line in raw_lines:
             line = line.strip()
-            if line and not line.startswith(";"):
-                words.append(int(line, 16))
+            if not line.startswith(":"):
+                continue
+            rec = line[1:]
+            if len(rec) < 10:
+                continue
+            length = int(rec[0:2], 16)
+            byte_addr = int(rec[2:6], 16)
+            rtype = int(rec[6:8], 16)
+            if rtype == 1:  # EOF
+                break
+            if rtype != 0:  # só registros de dados
+                continue
+            data = rec[8:8 + length * 2]
+            # agrupa em palavras de 4 bytes (big-endian)
+            for i in range(0, len(data) - 7, 8):
+                word = int(data[i:i + 8], 16)
+                waddr = (byte_addr + i // 2) // 4
+                words_by_addr[waddr] = word
+        if not words_by_addr:
+            return []
+        return [words_by_addr.get(i, 0) for i in range(max(words_by_addr) + 1)]
+
+    # Formato hex puro: uma palavra por linha
+    words = []
+    for line in raw_lines:
+        line = line.strip()
+        if line and not line.startswith(";"):
+            words.append(int(line, 16))
     return words
 
 
